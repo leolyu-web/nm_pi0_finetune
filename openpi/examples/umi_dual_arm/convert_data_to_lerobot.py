@@ -28,8 +28,10 @@ RIGHT_GRIP = 15
 # ego dims 16:23 are intentionally dropped.
 
 # Raw wrist cameras we keep (head cam ``observation.images.image`` is dropped).
-WRIST_1 = "observation.images.wrist_image_1"  # -> left_wrist_0_rgb
-WRIST_2 = "observation.images.wrist_image_2"  # -> right_wrist_0_rgb
+# Videos are copied into place manually after conversion, so these raw names are
+# kept only for documentation of the source layout.
+WRIST_1 = "observation.images.wrist_image_1"
+WRIST_2 = "observation.images.wrist_image_2"
 WRIST_HW = (320, 240)  # raw (height, width) of wrist videos
 
 # Output proprio/action layout: per arm [pos(3), rot6d(6), gripper(1)] = 10, x2 = 20.
@@ -75,10 +77,10 @@ def main(args: Args) -> None:
 
     raw_info = json.loads((raw_root / "meta" / "info.json").read_text())
     raw_fps = int(raw_info["fps"])
-    # We copy the wrist videos verbatim, so the output fps MUST equal the raw fps
-    # and every parquet row maps 1:1 to a video frame (no downsampling/dropping).
+    # The manually-copied wrist videos are verbatim, so the output fps MUST equal
+    # the raw fps and every parquet row maps 1:1 to a video frame (no downsampling).
     out_fps = raw_fps
-    print(f"raw_fps={raw_fps} -> copying videos verbatim, output fps={out_fps}")
+    print(f"raw_fps={raw_fps} -> output fps={out_fps}")
 
     if args.output_root is not None:
         output_path = pathlib.Path(args.output_root) / args.repo_id
@@ -95,12 +97,12 @@ def main(args: Args) -> None:
         root=output_path,
         features={
             # Two wrist cameras only (head cam dropped) -> pi0 left/right wrist slots.
-            "left_wrist_image": {
+            "observation.images.wrist_image_1": {
                 "dtype": "video",
                 "shape": (WRIST_HW[0], WRIST_HW[1], 3),
                 "names": ["height", "width", "channel"],
             },
-            "right_wrist_image": {
+            "observation.images.wrist_image_2": {
                 "dtype": "video",
                 "shape": (WRIST_HW[0], WRIST_HW[1], 3),
                 "names": ["height", "width", "channel"],
@@ -114,11 +116,9 @@ def main(args: Args) -> None:
 
     # The image keys are stored as videos; add_frame still needs a correctly
     # shaped array per frame to satisfy validation, but we never decode pixels:
-    # one reused dummy frame is enough. The throwaway PNGs the writer produces
-    # are deleted by save_episode once it finds the (copied) mp4 already present.
+    # one reused dummy frame is enough. Videos are NOT written here -- they will
+    # be copied into place manually after this conversion.
     dummy_frame = np.zeros((WRIST_HW[0], WRIST_HW[1], 3), dtype=np.uint8)
-
-    video_key_to_raw = {"left_wrist_image": WRIST_1, "right_wrist_image": WRIST_2}
 
     for ep in episodes:
         ep_idx = ep["episode_index"]
@@ -134,35 +134,21 @@ def main(args: Args) -> None:
         state20 = _build_state_action(state23)
         action20 = _build_state_action(action23)
 
-        # Source wrist videos (raw fps, row-aligned with the parquet).
-        # The raw data is pre-validated to have parquet rows = video frames,
-        # so we use the parquet length directly without counting video frames.
-        src_videos = {
-            key: raw_root / "videos" / f"chunk-{chunk:03d}" / raw_name / f"episode_{ep_idx:06d}.mp4"
-            for key, raw_name in video_key_to_raw.items()
-        }
         prompt = ep.get("task_annotation") or (ep.get("tasks") or ["manipulation"])[0]
 
         for t in range(n):
             dataset.add_frame(
                 {
-                    "left_wrist_image": dummy_frame,
-                    "right_wrist_image": dummy_frame,
+                    "observation.images.wrist_image_1": dummy_frame,
+                    "observation.images.wrist_image_2": dummy_frame,
                     "state": state20[t],
                     "actions": action20[t],
                     "task": prompt,
                 }
             )
 
-        # Place each source mp4 at the exact path the LeRobot writer expects so
-        # its ffmpeg encode step is a no-op (it skips when the file exists).
-        for key, src in src_videos.items():
-            dst = output_path / dataset.meta.get_video_file_path(ep_idx, key)
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(src, dst)
-
         dataset.save_episode()
-        print(f"episode {ep_idx:06d}: {n} frames (videos copied)")
+        print(f"episode {ep_idx:06d}: {n} frames")
 
     print(f"Done. Dataset written to {output_path}")
 
