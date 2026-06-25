@@ -360,33 +360,38 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 class UmiDualArmDataConfig(DataConfigFactory):
     """Config for a dual-arm dataset with UMI-style relative 6D actions.
 
-    Task-agnostic (the earphone dataset is just one example). The dataset stores
-    ABSOLUTE 20-dim EE poses (per arm: pos3 + rot6d6 + grip1). ``UmiDualArmInputs``
-    converts each action chunk into a UMI relative trajectory at load time, so
-    pi0's built-in linear ``DeltaActions`` is intentionally NOT applied.
+    Task-agnostic (the earphone dataset is just one example). The dataset is the
+    *raw* LeRobot dual-arm dataset; no offline conversion is performed. It
+    stores ABSOLUTE 23-dim state/action vectors (per arm: pos3 + quat_wxyz4 +
+    grip1, plus a 7-dim ego pose that is dropped). ``UmiDualArmInputs`` slices
+    the 23-dim vectors to 20-dim 6D-rotation poses and converts each action
+    chunk into a UMI relative trajectory at load time, so pi0's built-in linear
+    ``DeltaActions`` is intentionally NOT applied.
     """
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
-        # Remap the LeRobot dataset keys (defined in the conversion script) to the
-        # keys the transforms expect.
+        # Remap the raw LeRobot dataset keys to the keys ``UmiDualArmInputs``
+        # reads. The head camera (``observation.images.image``) is intentionally
+        # omitted from the repack so it never reaches the transform.
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "left_wrist_image": "left_wrist_image",
-                        "right_wrist_image": "right_wrist_image",
-                        "state": "state",
-                        "actions": "actions",
+                        "left_wrist_image": "observation.images.wrist_image_1",
+                        "right_wrist_image": "observation.images.wrist_image_2",
+                        "state": "observation.state",
+                        "actions": "action",
                         "prompt": "prompt",
                     }
                 )
             ]
         )
 
-        # Inputs handle the UMI relativization in SE(3); outputs invert it at inference.
-        # NOTE: we deliberately do NOT push DeltaActions/AbsoluteActions here -- the
-        # relative trajectory is already produced by UmiDualArmInputs.
+        # Inputs handle the 23->20 slicing AND the UMI relativization in SE(3);
+        # outputs invert the relativization at inference. NOTE: we deliberately
+        # do NOT push DeltaActions/AbsoluteActions here -- the relative
+        # trajectory is already produced by UmiDualArmInputs.
         data_transforms = _transforms.Group(
             inputs=[umi_dual_arm_policy.UmiDualArmInputs(model_type=model_config.model_type)],
             outputs=[umi_dual_arm_policy.UmiDualArmOutputs()],
@@ -399,6 +404,9 @@ class UmiDualArmDataConfig(DataConfigFactory):
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=model_transforms,
+            # The raw LeRobot dataset stores the action sequence under ``action``
+            # (singular). Override the default ``("actions",)``.
+            action_sequence_keys=("action",),
         )
 
 
@@ -725,15 +733,45 @@ _CONFIGS = [
     #
     # Dual-arm dataset (UMI-style relative 6D end-effector actions): full
     # fine-tuning of pi0 base, two wrist cameras only (no head cam/ego).
-    # Task-agnostic -- the earphone dataset is just one example.
+    # Reads the raw LeRobot dataset directly -- 23->20-dim slicing and the
+    # UMI relativization both happen at the transform layer. Task-agnostic;
+    # the earphone dataset is just one example.
     #
     TrainConfig(
         name="pi0_umi_dual_arm",
         # Full fine-tuning of the pi0 base model.
         model=pi0_config.Pi0Config(),
         data=UmiDualArmDataConfig(
-            # Set this to the repo_id used by convert_data_to_lerobot.py.
-            repo_id="umi_dual_arm_6d",
+            # Direct path to the earphone dataset (316 episodes, 199k frames).
+            repo_id="/home/it002338/Junlin_lv/pi0/earphone_0620_316episodes",
+            # Keep norm stats organized under a short asset_id instead of the full path.
+            assets=AssetsConfig(asset_id="earphone_0620"),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+    ),
+    #
+    # Template for fine-tuning on ANOTHER dual-arm dataset of the SAME format
+    # (LeRobot v2.1, 23-dim state/action, wrist_image_1 / wrist_image_2 videos).
+    # To use a new dataset, only change ``repo_id`` (absolute path to the dataset)
+    # and ``asset_id`` (a short unique label for its norm stats), then run:
+    #   uv run scripts/compute_norm_stats.py --config-name pi0_umi_dual_arm_v2
+    #   uv run scripts/train.py pi0_umi_dual_arm_v2 --exp-name=... --fsdp-devices=4
+    # If the new dataset has a DIFFERENT layout (state dims, camera keys, arm
+    # count, prompt language), the transforms in
+    # src/openpi/policies/umi_dual_arm_policy.py must be edited as well.
+    #
+    TrainConfig(
+        name="pi0_umi_dual_arm_v2",
+        model=pi0_config.Pi0Config(),
+        data=UmiDualArmDataConfig(
+            # CHANGE ME: absolute path to your new dataset.
+            repo_id="/home/it002338/Junlin_lv/pi0/CHANGE_ME_dataset",
+            # CHANGE ME: short unique label so norm stats don't collide with other datasets.
+            assets=AssetsConfig(asset_id="CHANGE_ME"),
             base_config=DataConfig(
                 prompt_from_task=True,
             ),

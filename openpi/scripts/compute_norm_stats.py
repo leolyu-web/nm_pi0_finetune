@@ -108,7 +108,12 @@ def main(config_name: str, max_frames: int | None = None):
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 
-    output_path = config.assets_dirs / data_config.repo_id
+    # NOTE: training loads norm stats from ``assets_dirs / asset_id`` (see
+    # DataConfigFactory._load_norm_stats). The original code joined ``repo_id``
+    # instead, which silently collapses to the dataset dir when ``repo_id`` is an
+    # absolute path -- so the stats landed where training never looks. Use the
+    # resolved ``asset_id`` (falling back to ``repo_id``) to keep both sides in sync.
+    output_path = config.assets_dirs / (data_config.asset_id or data_config.repo_id)
     print(f"Writing stats to: {output_path}")
     normalize.save(output_path, norm_stats)
 
