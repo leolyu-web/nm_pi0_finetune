@@ -1,40 +1,3 @@
-"""Preprocess + clean a raw dual-arm LeRobot v2.1 dataset into a pi0-trainable
-LeRobot v2.1 dataset using UMI-style end-effector pose representation.
-
-Task-agnostic: the earphone dataset is just one example of the expected input
-structure. Any dataset with the same schema (see step 1) works.
-
-What it does
-------------
-1. Reads the raw dual-arm dataset (``observation.state`` / ``action`` are 23-dim:
-   left[pos3+quat4+grip1], right[pos3+quat4+grip1], ego[pos3+quat4]).
-2. Drops the ego (head) motor dims and the head camera ``observation.images.image``.
-   Keeps ONLY the two wrist cameras.
-3. Converts each arm's [x,y,z]+quat(wxyz) into a 4x4 SE(3) transform, then to a
-   UMI-style 9D pose [x,y,z, rot6d(6)] and appends the gripper width:
-   per arm -> 10 dims; two arms -> 20-dim state & action.
-4. Stores ABSOLUTE poses on disk (state(t) = current EE pose, action(t) = the
-   absolute target pose). The UMI *relative trajectory* (each future pose
-   relative to the current observation pose, in SE(3)) is applied at LOAD time by
-   ``UmiDualArmInputs`` in ``openpi``, NOT baked here -- relative-to-current-obs
-   cannot be represented per-frame under openpi's overlapping action chunks.
-   pi0's linear delta transform stays OFF.
-5. Keeps the ORIGINAL video framerate and COPIES the two wrist mp4s verbatim
-   (no decode, no re-encode) -- the videos are placed at the exact paths the
-   LeRobot writer expects, so its ffmpeg encode step is skipped. Output fps
-   therefore equals the raw fps and every parquet row maps 1:1 to a video frame.
-6. Light cleaning: re-normalizes quaternions and skips frames flagged invalid by
-   the SLAM / width validity masks.
-
-Usage (must run inside the synced openpi uv env):
-
-    uv run examples/umi_dual_arm/convert_data_to_lerobot.py \
-        --raw_root /home/it002338/Junlin_lv/pi0/earphone_0620_316episodes \
-        --repo_id umi_dual_arm_6d
-
-Output goes to ``$HF_LEROBOT_HOME/<repo_id>`` (or --output_root if given).
-"""
-
 from __future__ import annotations
 
 import dataclasses
@@ -87,23 +50,6 @@ def _build_state_action(vec23: np.ndarray) -> np.ndarray:
     left = _arm_to_pose10(vec23[:, LEFT_POS], vec23[:, LEFT_QUAT], vec23[:, LEFT_GRIP])
     right = _arm_to_pose10(vec23[:, RIGHT_POS], vec23[:, RIGHT_QUAT], vec23[:, RIGHT_GRIP])
     return np.concatenate([left, right], axis=-1)  # (T,20)
-
-
-def _count_video_frames(path: pathlib.Path) -> int:
-    """Count frames in an mp4 WITHOUT decoding pixels (demux packets only).
-
-    Cheap and codec-agnostic (works for AV1), used to keep the parquet row
-    count in sync with the copied video when we skip pixel decoding entirely.
-    """
-    import av  # lazy import: PyAV is part of the synced env
-
-    with av.open(str(path)) as container:
-        stream = container.streams.video[0]
-        n = stream.frames  # often populated from the container metadata
-        if n:
-            return int(n)
-        # Fallback: count demuxed packets that carry a frame (still no decode).
-        return sum(1 for p in container.demux(stream) if p.size and p.pts is not None)
 
 
 @dataclasses.dataclass
@@ -188,16 +134,16 @@ def main(args: Args) -> None:
         state20 = _build_state_action(state23)
         action20 = _build_state_action(action23)
 
-        # Source wrist videos (raw fps, row-aligned with the parquet). We only
-        # count frames here (no decode) to keep the parquet length <= each video.
+        # Source wrist videos (raw fps, row-aligned with the parquet).
+        # The raw data is pre-validated to have parquet rows = video frames,
+        # so we use the parquet length directly without counting video frames.
         src_videos = {
             key: raw_root / "videos" / f"chunk-{chunk:03d}" / raw_name / f"episode_{ep_idx:06d}.mp4"
             for key, raw_name in video_key_to_raw.items()
         }
-        n_use = min(n, *(_count_video_frames(p) for p in src_videos.values()))
         prompt = ep.get("task_annotation") or (ep.get("tasks") or ["manipulation"])[0]
 
-        for t in range(n_use):
+        for t in range(n):
             dataset.add_frame(
                 {
                     "left_wrist_image": dummy_frame,
@@ -216,7 +162,7 @@ def main(args: Args) -> None:
             shutil.copyfile(src, dst)
 
         dataset.save_episode()
-        print(f"episode {ep_idx:06d}: {n} raw -> {n_use} frames (videos copied)")
+        print(f"episode {ep_idx:06d}: {n} frames (videos copied)")
 
     print(f"Done. Dataset written to {output_path}")
 
