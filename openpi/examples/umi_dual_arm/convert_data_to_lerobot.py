@@ -19,8 +19,10 @@ What it does
    ``UmiDualArmInputs`` in ``openpi``, NOT baked here -- relative-to-current-obs
    cannot be represented per-frame under openpi's overlapping action chunks.
    pi0's linear delta transform stays OFF.
-5. Downsamples 30 fps -> ``TARGET_FPS`` (default 10) and re-encodes the two wrist
-   videos at the new rate.
+5. Keeps the ORIGINAL video framerate and COPIES the two wrist mp4s verbatim
+   (no decode, no re-encode) -- the videos are placed at the exact paths the
+   LeRobot writer expects, so its ffmpeg encode step is skipped. Output fps
+   therefore equals the raw fps and every parquet row maps 1:1 to a video frame.
 6. Light cleaning: re-normalizes quaternions and skips frames flagged invalid by
    the SLAM / width validity masks.
 
@@ -87,26 +89,23 @@ def _build_state_action(vec23: np.ndarray) -> np.ndarray:
     return np.concatenate([left, right], axis=-1)  # (T,20)
 
 
-def _decode_video(path: pathlib.Path) -> np.ndarray:
-    """Decode an mp4 into (T, H, W, 3) uint8 RGB.
+def _count_video_frames(path: pathlib.Path) -> int:
+    """Count frames in an mp4 WITHOUT decoding pixels (demux packets only).
 
-    Uses PyAV (which ships ``libdav1d``) so AV1-encoded inputs decode in pure
-    software. OpenCV's bundled libavcodec only exposes a hardware AV1 path on
-    some hosts and silently produces zero frames otherwise, which is what the
-    raw earphone dataset hit.
+    Cheap and codec-agnostic (works for AV1), used to keep the parquet row
+    count in sync with the copied video when we skip pixel decoding entirely.
     """
     import av  # lazy import: PyAV is part of the synced env
 
-    frames: list[np.ndarray] = []
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
-        # Decode threading helps a lot on long episodes; harmless if unsupported.
-        stream.thread_type = "AUTO"
-        for frame in container.decode(stream):
-            frames.append(frame.to_ndarray(format="rgb24"))
-    if not frames:
-        raise RuntimeError(f"No frames decoded from {path}")
-    return np.stack(frames)
+        n = stream.frames  # often populated from the container metadata
+        if n:
+            return int(n)
+        # Fallback: count demuxed packets that carry a frame (still no decode).
+        return sum(1 for p in container.demux(stream) if p.size and p.pts is not None)
+
+
 @dataclasses.dataclass
 class Args:
     raw_root: str
@@ -115,10 +114,6 @@ class Args:
     """Output dataset repo id (folder name under HF_LEROBOT_HOME, or under --output_root)."""
     output_root: str | None = None
     """If set, write the dataset here instead of $HF_LEROBOT_HOME/<repo_id>."""
-    target_fps: int = 10
-    """Output fps. Raw is 30 fps; we keep every round(30/target_fps)-th frame."""
-    drop_invalid_frames: bool = True
-    """If True, skip frames where either arm's SLAM or width validity mask is 0."""
     max_episodes: int | None = None
     """If set, only convert the first N episodes (for quick smoke tests)."""
 
@@ -134,8 +129,10 @@ def main(args: Args) -> None:
 
     raw_info = json.loads((raw_root / "meta" / "info.json").read_text())
     raw_fps = int(raw_info["fps"])
-    stride = max(1, round(raw_fps / args.target_fps))
-    print(f"raw_fps={raw_fps} target_fps={args.target_fps} -> frame stride={stride}")
+    # We copy the wrist videos verbatim, so the output fps MUST equal the raw fps
+    # and every parquet row maps 1:1 to a video frame (no downsampling/dropping).
+    out_fps = raw_fps
+    print(f"raw_fps={raw_fps} -> copying videos verbatim, output fps={out_fps}")
 
     if args.output_root is not None:
         output_path = pathlib.Path(args.output_root) / args.repo_id
@@ -148,7 +145,7 @@ def main(args: Args) -> None:
     dataset = LeRobotDataset.create(
         repo_id=args.repo_id,
         robot_type="dual_arm",
-        fps=args.target_fps,
+        fps=out_fps,
         root=output_path,
         features={
             # Two wrist cameras only (head cam dropped) -> pi0 left/right wrist slots.
@@ -168,7 +165,15 @@ def main(args: Args) -> None:
         image_writer_threads=10,
         image_writer_processes=5,
     )
-    # PLACEHOLDER_LOOP
+
+    # The image keys are stored as videos; add_frame still needs a correctly
+    # shaped array per frame to satisfy validation, but we never decode pixels:
+    # one reused dummy frame is enough. The throwaway PNGs the writer produces
+    # are deleted by save_episode once it finds the (copied) mp4 already present.
+    dummy_frame = np.zeros((WRIST_HW[0], WRIST_HW[1], 3), dtype=np.uint8)
+
+    video_key_to_raw = {"left_wrist_image": WRIST_1, "right_wrist_image": WRIST_2}
+
     for ep in episodes:
         ep_idx = ep["episode_index"]
         chunk = ep_idx // raw_info["chunks_size"]
@@ -179,43 +184,39 @@ def main(args: Args) -> None:
         state23 = np.stack(df["observation.state"].to_numpy()).astype(np.float64)
         action23 = np.stack(df["action"].to_numpy()).astype(np.float64)
 
-        # Per-frame validity: both arms' slam + width masks must be valid.
-        valid = np.ones(n, dtype=bool)
-        if args.drop_invalid_frames:
-            for arm in ("left", "right"):
-                valid &= df[f"slam_diagnostics_valid_mask.{arm}"].to_numpy().astype(bool)
-                valid &= df[f"width_valid_mask.{arm}"].to_numpy().astype(bool)
-
         # Build absolute 20-dim state/action (quats re-normalized in posequat_to_mat).
         state20 = _build_state_action(state23)
         action20 = _build_state_action(action23)
 
-        # Decode the two wrist videos (raw 30 fps, row-aligned with the parquet).
-        v1 = _decode_video(
-            raw_root / "videos" / f"chunk-{chunk:03d}" / WRIST_1 / f"episode_{ep_idx:06d}.mp4"
-        )
-        v2 = _decode_video(
-            raw_root / "videos" / f"chunk-{chunk:03d}" / WRIST_2 / f"episode_{ep_idx:06d}.mp4"
-        )
-        n_use = min(n, len(v1), len(v2))
+        # Source wrist videos (raw fps, row-aligned with the parquet). We only
+        # count frames here (no decode) to keep the parquet length <= each video.
+        src_videos = {
+            key: raw_root / "videos" / f"chunk-{chunk:03d}" / raw_name / f"episode_{ep_idx:06d}.mp4"
+            for key, raw_name in video_key_to_raw.items()
+        }
+        n_use = min(n, *(_count_video_frames(p) for p in src_videos.values()))
         prompt = ep.get("task_annotation") or (ep.get("tasks") or ["manipulation"])[0]
 
-        kept = 0
-        for t in range(0, n_use, stride):
-            if not valid[t]:
-                continue
+        for t in range(n_use):
             dataset.add_frame(
                 {
-                    "left_wrist_image": v1[t],
-                    "right_wrist_image": v2[t],
+                    "left_wrist_image": dummy_frame,
+                    "right_wrist_image": dummy_frame,
                     "state": state20[t],
                     "actions": action20[t],
                     "task": prompt,
                 }
             )
-            kept += 1
+
+        # Place each source mp4 at the exact path the LeRobot writer expects so
+        # its ffmpeg encode step is a no-op (it skips when the file exists).
+        for key, src in src_videos.items():
+            dst = output_path / dataset.meta.get_video_file_path(ep_idx, key)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(src, dst)
+
         dataset.save_episode()
-        print(f"episode {ep_idx:06d}: {n} raw -> {kept} kept frames")
+        print(f"episode {ep_idx:06d}: {n} raw -> {n_use} frames (videos copied)")
 
     print(f"Done. Dataset written to {output_path}")
 
