@@ -88,17 +88,22 @@ def _build_state_action(vec23: np.ndarray) -> np.ndarray:
 
 
 def _decode_video(path: pathlib.Path) -> np.ndarray:
-    """Decode an mp4 into (T, H, W, 3) uint8 RGB using OpenCV."""
-    import cv2  # imported lazily so the module imports without the synced env
+    """Decode an mp4 into (T, H, W, 3) uint8 RGB.
 
-    cap = cv2.VideoCapture(str(path))
-    frames = []
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-        frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    cap.release()
+    Uses PyAV (which ships ``libdav1d``) so AV1-encoded inputs decode in pure
+    software. OpenCV's bundled libavcodec only exposes a hardware AV1 path on
+    some hosts and silently produces zero frames otherwise, which is what the
+    raw earphone dataset hit.
+    """
+    import av  # lazy import: PyAV is part of the synced env
+
+    frames: list[np.ndarray] = []
+    with av.open(str(path)) as container:
+        stream = container.streams.video[0]
+        # Decode threading helps a lot on long episodes; harmless if unsupported.
+        stream.thread_type = "AUTO"
+        for frame in container.decode(stream):
+            frames.append(frame.to_ndarray(format="rgb24"))
     if not frames:
         raise RuntimeError(f"No frames decoded from {path}")
     return np.stack(frames)
