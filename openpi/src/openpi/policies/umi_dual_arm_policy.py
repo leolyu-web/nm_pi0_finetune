@@ -1,4 +1,4 @@
-"""Data transforms for a dual-arm dataset with UMI-style 6D EE poses.
+"""Data transforms for a dual-arm dataset with UMI-style EE poses (quaternion).
 
 This is task-agnostic (the earphone dataset is just one example). The on-disk
 LeRobot dataset is consumed *as-is* (no offline conversion); per frame it stores:
@@ -7,23 +7,28 @@ LeRobot dataset is consumed *as-is* (no offline conversion); per frame it stores
     observation.images.wrist_image_1, observation.images.wrist_image_2 : uint8 frames
     observation.images.image : head cam (loaded by LeRobot but dropped here)
 
-``UmiDualArmInputs`` slices the 23-dim vector down to a 20-dim two-arm pose with
-6D rotation -- per arm [pos3, rot6d6, grip1] -- by dropping the last 7 ego dims
-and converting each arm's quaternion (wxyz) to rot6d. It then maps everything
-into pi0's expected dict and -- crucially -- converts the absolute action
-*chunk* into a UMI relative trajectory: every pose in the chunk is expressed in
-the frame of the current observation pose,
+``UmiDualArmInputs`` slices the 23-dim vector down to a 16-dim two-arm pose --
+per arm [pos3, quat_wxyz4, grip1] -- by dropping the last 7 ego dims. The
+rotation is kept as a (w,x,y,z) quaternion (NOT converted to 6D). It then maps
+everything into pi0's expected dict and -- crucially -- converts the absolute
+action *chunk* into a UMI relative trajectory: every pose in the chunk is
+expressed in the frame of the current observation pose,
 
     T_rel = inv(T_obs) @ T_action
 
-per arm, in SE(3). The gripper width is left absolute. This is the load-time
-equivalent of pi0's linear ``DeltaActions`` but composed in SE(3) on the 6D
-rotation -- so pi0's built-in delta transform MUST stay OFF for this dataset.
+per arm, composed in SE(3) (the quaternion is lifted to a rotation matrix for
+the SE(3) math, then read back out as a quaternion). The relative quaternion is
+canonicalized to w >= 0 to remove the double-cover ambiguity so pi0 regresses a
+single consistent target. The gripper width is left absolute. This is the
+load-time equivalent of pi0's linear ``DeltaActions`` but composed in SE(3) on
+the orientation -- so pi0's built-in delta transform MUST stay OFF for this
+dataset.
 
 ``UmiDualArmOutputs`` inverts the relativization at inference: given the current
-(20-dim, post-input-transform) state and the model's relative action chunk, it
-returns absolute 20-dim poses. The deployed runtime is responsible for any
-final 20-dim -> robot-native action conversion.
+(16-dim, post-input-transform) state and the model's relative action chunk, it
+returns absolute 16-dim poses. The model's predicted quaternion need not be unit
+norm -- it is re-normalized when lifted back to a rotation matrix. The deployed
+runtime is responsible for any final 16-dim -> robot-native action conversion.
 """
 
 import dataclasses
@@ -35,13 +40,13 @@ from scipy.spatial.transform import Rotation
 from openpi import transforms
 from openpi.models import model as _model
 
-# Per-arm layout within the 10-dim block.
+# Per-arm layout within the 8-dim block.
 _POS = slice(0, 3)
-_ROT6D = slice(3, 9)
-_GRIP = 9
-ARM_DIM = 10
+_QUAT_WXYZ = slice(3, 7)
+_GRIP = 7
+ARM_DIM = 8
 N_ARMS = 2
-STATE_DIM = ARM_DIM * N_ARMS  # 20
+STATE_DIM = ARM_DIM * N_ARMS  # 16
 
 # Raw 23-dim layout in the LeRobot dataset (per meta/info.json of the
 # earphone-style dataset). Indices below index into the raw vector.
@@ -55,33 +60,38 @@ _RAW_RIGHT_GRIP = 15
 
 
 # --------------------------------------------------------------------------- #
-# rotation-6D / SE(3) helpers (numpy + scipy), matching examples/umi_dual_arm/pose_util.py
+# quaternion / SE(3) helpers (numpy + scipy). Quaternions are (w, x, y, z).
 # --------------------------------------------------------------------------- #
-def _rot6d_to_mat(rot6d: np.ndarray) -> np.ndarray:
-    a1 = rot6d[..., 0:3]
-    a2 = rot6d[..., 3:6]
-    b1 = a1 / np.linalg.norm(a1, axis=-1, keepdims=True)
-    a2 = a2 - np.sum(b1 * a2, axis=-1, keepdims=True) * b1
-    b2 = a2 / np.linalg.norm(a2, axis=-1, keepdims=True)
-    b3 = np.cross(b1, b2)
-    return np.stack([b1, b2, b3], axis=-1)
+def _quat_wxyz_to_mat(quat_wxyz: np.ndarray) -> np.ndarray:
+    """[..., w, x, y, z] -> 3x3 rotation matrix (defensively re-normalized)."""
+    quat_xyzw = np.concatenate([quat_wxyz[..., 1:4], quat_wxyz[..., 0:1]], axis=-1)
+    quat_xyzw = quat_xyzw / np.linalg.norm(quat_xyzw, axis=-1, keepdims=True)
+    return Rotation.from_quat(quat_xyzw).as_matrix()
 
 
-def _mat_to_rot6d(mat: np.ndarray) -> np.ndarray:
-    return np.concatenate([mat[..., :, 0], mat[..., :, 1]], axis=-1)
+def _mat_to_quat_wxyz(mat: np.ndarray) -> np.ndarray:
+    """3x3 rotation matrix -> [..., w, x, y, z], canonicalized to w >= 0.
+
+    Forcing w >= 0 picks a single representative from the quaternion double cover
+    (q and -q are the same rotation), so the regression target is unambiguous.
+    """
+    quat_xyzw = Rotation.from_matrix(mat).as_quat()
+    quat_wxyz = np.concatenate([quat_xyzw[..., 3:4], quat_xyzw[..., 0:3]], axis=-1)
+    return np.where(quat_wxyz[..., 0:1] < 0, -quat_wxyz, quat_wxyz)
 
 
-def _pose10_to_mat(pose10: np.ndarray) -> np.ndarray:
-    """(...,10)=[pos3,rot6d6,grip1] -> (4x4 mat, grip)."""
-    out = np.zeros(pose10.shape[:-1] + (4, 4), dtype=np.float64)
-    out[..., :3, :3] = _rot6d_to_mat(pose10[..., _ROT6D])
-    out[..., :3, 3] = pose10[..., _POS]
+def _pose8_to_mat(pose8: np.ndarray) -> np.ndarray:
+    """(...,8)=[pos3,quat_wxyz4,grip1] -> (4x4 mat). Grip column is ignored."""
+    out = np.zeros(pose8.shape[:-1] + (4, 4), dtype=np.float64)
+    out[..., :3, :3] = _quat_wxyz_to_mat(pose8[..., _QUAT_WXYZ])
+    out[..., :3, 3] = pose8[..., _POS]
     out[..., 3, 3] = 1.0
     return out
 
 
-def _mat_to_pose9(mat: np.ndarray) -> np.ndarray:
-    return np.concatenate([mat[..., :3, 3], _mat_to_rot6d(mat[..., :3, :3])], axis=-1)
+def _mat_to_pose7(mat: np.ndarray) -> np.ndarray:
+    """(...,4,4) -> (...,7) = [pos3, quat_wxyz4]."""
+    return np.concatenate([mat[..., :3, 3], _mat_to_quat_wxyz(mat[..., :3, :3])], axis=-1)
 
 
 def _mat_inv(mat: np.ndarray) -> np.ndarray:
@@ -93,21 +103,23 @@ def _mat_inv(mat: np.ndarray) -> np.ndarray:
     out[..., :3, 3] = -np.einsum("...ij,...j->...i", r_inv, t)
     out[..., 3, 3] = 1.0
     return out
+
+
 def _relativize_actions(state: np.ndarray, actions: np.ndarray) -> np.ndarray:
     """Express each action pose relative to the current state pose, per arm (UMI).
 
-    state: (20,) current absolute EE pose. actions: (T,20) absolute targets.
-    Returns (T,20): per arm [rel_pos3, rel_rot6d6, grip1] (gripper stays absolute).
+    state: (16,) current absolute EE pose. actions: (T,16) absolute targets.
+    Returns (T,16): per arm [rel_pos3, rel_quat_wxyz4, grip1] (gripper stays absolute).
     """
     out = np.empty_like(actions)
     for a in range(N_ARMS):
         sl = slice(a * ARM_DIM, (a + 1) * ARM_DIM)
         block = actions[:, sl]
-        base = _pose10_to_mat(state[sl])  # (4,4)
-        act = _pose10_to_mat(block)  # (T,4,4)
+        base = _pose8_to_mat(state[sl])  # (4,4)
+        act = _pose8_to_mat(block)  # (T,4,4)
         rel = _mat_inv(base)[None] @ act  # (T,4,4)
         out[:, sl] = np.concatenate(
-            [_mat_to_pose9(rel), block[:, _GRIP, None]], axis=-1
+            [_mat_to_pose7(rel), block[:, _GRIP, None]], axis=-1
         )
     return out
 
@@ -118,11 +130,11 @@ def _absolutize_actions(state: np.ndarray, rel_actions: np.ndarray) -> np.ndarra
     for a in range(N_ARMS):
         sl = slice(a * ARM_DIM, (a + 1) * ARM_DIM)
         block = rel_actions[:, sl]
-        base = _pose10_to_mat(state[sl])  # (4,4)
-        rel = _pose10_to_mat(block)  # (T,4,4); grip column ignored by _pose10_to_mat
+        base = _pose8_to_mat(state[sl])  # (4,4)
+        rel = _pose8_to_mat(block)  # (T,4,4); grip column ignored by _pose8_to_mat
         absm = base[None] @ rel
         out[:, sl] = np.concatenate(
-            [_mat_to_pose9(absm), block[:, _GRIP, None]], axis=-1
+            [_mat_to_pose7(absm), block[:, _GRIP, None]], axis=-1
         )
     return out
 
@@ -134,34 +146,20 @@ def _parse_image(image) -> np.ndarray:
     if image.shape[0] == 3:  # (C,H,W) -> (H,W,C)
         image = einops.rearrange(image, "c h w -> h w c")
     return image
-def _quat_wxyz_to_mat(quat_wxyz: np.ndarray) -> np.ndarray:
-    """[..., w, x, y, z] -> 3x3 rotation matrix (defensively re-normalized)."""
-    quat_xyzw = np.concatenate([quat_wxyz[..., 1:4], quat_wxyz[..., 0:1]], axis=-1)
-    quat_xyzw = quat_xyzw / np.linalg.norm(quat_xyzw, axis=-1, keepdims=True)
-    return Rotation.from_quat(quat_xyzw).as_matrix()
 
 
-def _arm_raw_to_pose10(pos: np.ndarray, quat_wxyz: np.ndarray, grip: np.ndarray) -> np.ndarray:
-    """(...,3),(...,4 wxyz),(...,) -> (...,10) = [pos3, rot6d6, grip1]."""
-    rot = _quat_wxyz_to_mat(quat_wxyz)  # (...,3,3)
-    rot6d = np.concatenate([rot[..., :, 0], rot[..., :, 1]], axis=-1)
-    return np.concatenate([pos, rot6d, grip[..., None]], axis=-1)
+def _raw23_to_pose16(vec23: np.ndarray) -> np.ndarray:
+    """Raw (...,23) two-arm + ego state/action -> (...,16) two-arm pose.
 
-
-def _raw23_to_pose20(vec23: np.ndarray) -> np.ndarray:
-    """Raw (...,23) two-arm + ego state/action -> (...,20) two-arm 6D pose.
-
-    Drops the trailing 7 ego dims; converts each arm's wxyz quaternion to rot6d.
+    Drops the trailing 7 ego dims; keeps each arm's (w,x,y,z) quaternion as-is.
     """
-    left = _arm_raw_to_pose10(
-        vec23[..., _RAW_LEFT_POS],
-        vec23[..., _RAW_LEFT_QUAT_WXYZ],
-        vec23[..., _RAW_LEFT_GRIP],
+    left = np.concatenate(
+        [vec23[..., _RAW_LEFT_POS], vec23[..., _RAW_LEFT_QUAT_WXYZ], vec23[..., _RAW_LEFT_GRIP, None]],
+        axis=-1,
     )
-    right = _arm_raw_to_pose10(
-        vec23[..., _RAW_RIGHT_POS],
-        vec23[..., _RAW_RIGHT_QUAT_WXYZ],
-        vec23[..., _RAW_RIGHT_GRIP],
+    right = np.concatenate(
+        [vec23[..., _RAW_RIGHT_POS], vec23[..., _RAW_RIGHT_QUAT_WXYZ], vec23[..., _RAW_RIGHT_GRIP, None]],
+        axis=-1,
     )
     return np.concatenate([left, right], axis=-1)
 
@@ -178,8 +176,8 @@ class UmiDualArmInputs(transforms.DataTransformFn):
     model_type: _model.ModelType
 
     def __call__(self, data: dict) -> dict:
-        # 23-dim raw state -> 20-dim two-arm 6D pose (drops 7 ego dims).
-        state = _raw23_to_pose20(np.asarray(data["state"], dtype=np.float64))  # (20,)
+        # 23-dim raw state -> 16-dim two-arm pose (drops 7 ego dims, keeps quat).
+        state = _raw23_to_pose16(np.asarray(data["state"], dtype=np.float64))  # (16,)
 
         left_wrist = _parse_image(data["left_wrist_image"])
         right_wrist = _parse_image(data["right_wrist_image"])
@@ -200,8 +198,8 @@ class UmiDualArmInputs(transforms.DataTransformFn):
         }
 
         if "actions" in data:
-            # (T,23) raw absolute -> (T,20) -> UMI relative trajectory in SE(3).
-            actions = _raw23_to_pose20(np.asarray(data["actions"], dtype=np.float64))
+            # (T,23) raw absolute -> (T,16) -> UMI relative trajectory in SE(3).
+            actions = _raw23_to_pose16(np.asarray(data["actions"], dtype=np.float64))
             inputs["actions"] = _relativize_actions(state, actions).astype(np.float32)
 
         if "prompt" in data:

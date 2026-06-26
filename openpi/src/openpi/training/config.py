@@ -358,14 +358,15 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 @dataclasses.dataclass(frozen=True)
 class UmiDualArmDataConfig(DataConfigFactory):
-    """Config for a dual-arm dataset with UMI-style relative 6D actions.
+    """Config for a dual-arm dataset with UMI-style relative quaternion actions.
 
     Task-agnostic (the earphone dataset is just one example). The dataset is the
     *raw* LeRobot dual-arm dataset; no offline conversion is performed. It
     stores ABSOLUTE 23-dim state/action vectors (per arm: pos3 + quat_wxyz4 +
     grip1, plus a 7-dim ego pose that is dropped). ``UmiDualArmInputs`` slices
-    the 23-dim vectors to 20-dim 6D-rotation poses and converts each action
-    chunk into a UMI relative trajectory at load time, so pi0's built-in linear
+    the 23-dim vectors to 16-dim poses (per arm: pos3 + quat_wxyz4 + grip1; the
+    quaternion is kept, not converted to 6D) and converts each action chunk into
+    a UMI relative trajectory in SE(3) at load time, so pi0's built-in linear
     ``DeltaActions`` is intentionally NOT applied.
     """
 
@@ -731,9 +732,9 @@ _CONFIGS = [
         num_train_steps=30_000,
     ),
     #
-    # Dual-arm dataset (UMI-style relative 6D end-effector actions): full
+    # Dual-arm dataset (UMI-style relative quaternion end-effector actions): full
     # fine-tuning of pi0 base, two wrist cameras only (no head cam/ego).
-    # Reads the raw LeRobot dataset directly -- 23->20-dim slicing and the
+    # Reads the raw LeRobot dataset directly -- 23->16-dim slicing and the
     # UMI relativization both happen at the transform layer. Task-agnostic;
     # the earphone dataset is just one example.
     #
