@@ -21,6 +21,7 @@ import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
 import openpi.policies.umi_dual_arm_policy as umi_dual_arm_policy
+import openpi.policies.umi_dual_arm_rot6d_policy as umi_dual_arm_rot6d_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -370,6 +371,14 @@ class UmiDualArmDataConfig(DataConfigFactory):
     ``DeltaActions`` is intentionally NOT applied.
     """
 
+    # Optional Option-2 world reframe: per-arm constant rotation W as a (w,x,y,z)
+    # quaternion ((left), (right)). Left-applied to all absolute poses so the state
+    # orientation cluster sits near w=1, away from the quaternion w=0 / 180deg
+    # discontinuity. Relative action targets are invariant; only the absolute STATE
+    # feature moves, so a config that sets this MUST recompute norm_stats (and should
+    # use its own asset_id). None -> no reframe (v1/v2 behavior).
+    world_reframe_quat_wxyz: tuple | None = None
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         # Remap the raw LeRobot dataset keys to the keys ``UmiDualArmInputs``
@@ -394,8 +403,13 @@ class UmiDualArmDataConfig(DataConfigFactory):
         # do NOT push DeltaActions/AbsoluteActions here -- the relative
         # trajectory is already produced by UmiDualArmInputs.
         data_transforms = _transforms.Group(
-            inputs=[umi_dual_arm_policy.UmiDualArmInputs(model_type=model_config.model_type)],
-            outputs=[umi_dual_arm_policy.UmiDualArmOutputs()],
+            inputs=[
+                umi_dual_arm_policy.UmiDualArmInputs(
+                    model_type=model_config.model_type,
+                    world_reframe_quat_wxyz=self.world_reframe_quat_wxyz,
+                )
+            ],
+            outputs=[umi_dual_arm_policy.UmiDualArmOutputs(world_reframe_quat_wxyz=self.world_reframe_quat_wxyz)],
         )
 
         model_transforms = ModelTransformFactory()(model_config)
@@ -407,6 +421,52 @@ class UmiDualArmDataConfig(DataConfigFactory):
             model_transforms=model_transforms,
             # The raw LeRobot dataset stores the action sequence under ``action``
             # (singular). Override the default ``("actions",)``.
+            action_sequence_keys=("action",),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class UmiDualArmRot6dDataConfig(DataConfigFactory):
+    """6D-rotation sibling of ``UmiDualArmDataConfig``.
+
+    Identical pipeline (raw LeRobot dual-arm dataset, no offline conversion, two
+    wrist cams, SE(3) UMI relativization at load time, built-in ``DeltaActions``
+    OFF), except the rotation is represented as a continuous 6D vector (Gram-
+    Schmidt) instead of a quaternion. Per arm the pose is 10-dim [pos3, rot6d6,
+    grip1]; STATE_DIM=20. 6D has no double cover / no w=0 sign-flip discontinuity,
+    so the Option-2 world reframe is unnecessary here.
+    """
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "left_wrist_image": "observation.images.wrist_image_1",
+                        "right_wrist_image": "observation.images.wrist_image_2",
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                    }
+                )
+            ]
+        )
+
+        # Inputs handle the 23->20 slicing (quat->rot6d) AND the UMI relativization
+        # in SE(3); outputs invert it at inference. DeltaActions stays OFF.
+        data_transforms = _transforms.Group(
+            inputs=[umi_dual_arm_rot6d_policy.UmiDualArmInputs(model_type=model_config.model_type)],
+            outputs=[umi_dual_arm_rot6d_policy.UmiDualArmOutputs()],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
             action_sequence_keys=("action",),
         )
 
@@ -773,6 +833,65 @@ _CONFIGS = [
             repo_id="/home/it002338/Junlin_lv/pi0/CHANGE_ME_dataset",
             # CHANGE ME: short unique label so norm stats don't collide with other datasets.
             assets=AssetsConfig(asset_id="CHANGE_ME"),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+    ),
+    #
+    # Same as pi0_umi_dual_arm (earphone dataset, full fine-tune) but with the
+    # Option-2 world reframe ENABLED and nothing else changed. A constant per-arm
+    # rotation W is left-applied to all absolute poses, moving the absolute state
+    # quaternion cluster onto w~=1 (away from the w=0 / 180deg discontinuity). The
+    # relative action targets the model regresses are mathematically unchanged;
+    # UmiDualArmOutputs undoes W at inference so the deployed runtime sees the
+    # original frame. W = inv(mean orientation) per arm, computed from this dataset.
+    #
+    # IMPORTANT: the state distribution moved, so this config has its OWN asset_id
+    # and its norm_stats MUST be recomputed (do not reuse earphone_0620):
+    #   uv run scripts/compute_norm_stats.py --config-name pi0_umi_dual_arm_v3
+    #   uv run scripts/train.py pi0_umi_dual_arm_v3 --exp-name=... --fsdp-devices=4
+    #
+    TrainConfig(
+        name="pi0_umi_dual_arm_v3",
+        model=pi0_config.Pi0Config(),
+        data=UmiDualArmDataConfig(
+            repo_id="/home/it002338/Junlin_lv/pi0/earphone_0620_316episodes",
+            # Distinct asset_id so reframed norm stats don't collide with pi0_umi_dual_arm.
+            assets=AssetsConfig(asset_id="earphone_0620_reframe"),
+            # Per-arm W = inv(mean orientation), computed from the earphone dataset.
+            world_reframe_quat_wxyz=(
+                (0.45594531, -0.03043296, -0.23385571, 0.85819533),  # left
+                (0.45044910, -0.75766090, 0.41203593, -0.23080718),  # right
+            ),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+    ),
+    #
+    # Same earphone dataset and full fine-tune as pi0_umi_dual_arm, but the rotation
+    # is represented as a CONTINUOUS 6D vector (Gram-Schmidt) instead of a quaternion.
+    # Per arm the pose is 10-dim [pos3, rot6d6, grip1] -> STATE_DIM=20. 6D has no
+    # double cover and no w=0 / 180deg sign-flip discontinuity, so it is the robust
+    # choice when orientations are spread out -- and it is free at the model since pi0
+    # zero-pads actions to action_dim=32 regardless. No world reframe needed.
+    #
+    # Distinct asset_id (state/action are 20-dim now), so norm_stats MUST be recomputed:
+    #   uv run scripts/compute_norm_stats.py --config-name pi0_umi_dual_arm_v4
+    #   uv run scripts/train.py pi0_umi_dual_arm_v4 --exp-name=... --fsdp-devices=4
+    # The deployed runtime must consume 20-dim (6D-rotation) actions, not 16-dim.
+    #
+    TrainConfig(
+        name="pi0_umi_dual_arm_v4",
+        model=pi0_config.Pi0Config(),
+        data=UmiDualArmRot6dDataConfig(
+            repo_id="/home/it002338/Junlin_lv/pi0/earphone_0620_316episodes",
+            assets=AssetsConfig(asset_id="earphone_0620_rot6d"),
             base_config=DataConfig(
                 prompt_from_task=True,
             ),

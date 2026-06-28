@@ -164,6 +164,38 @@ def _raw23_to_pose16(vec23: np.ndarray) -> np.ndarray:
     return np.concatenate([left, right], axis=-1)
 
 
+# --------------------------------------------------------------------------- #
+# Option-2 world reframe: a constant per-arm rotation W left-applied to every
+# absolute pose (T -> diag(W,1) @ T). Relative action targets are INVARIANT to
+# this (W cancels in inv(T_obs) @ T_act), so it changes nothing the model
+# regresses; it only rotates the ABSOLUTE state feature so its quaternion cluster
+# sits near w=1, away from the w=0 / 180deg double-cover discontinuity. Pick
+# W = inv(mean orientation) per arm. NOTE: because the state distribution moves,
+# norm_stats MUST be recomputed for any config that sets this.
+# --------------------------------------------------------------------------- #
+def _reframe_mats(quat_wxyz_per_arm) -> np.ndarray:
+    """((w,x,y,z) per arm) -> (N_ARMS,3,3) rotation matrices W to left-apply."""
+    q = np.asarray(quat_wxyz_per_arm, dtype=np.float64)  # (N_ARMS,4)
+    return _quat_wxyz_to_mat(q)  # (N_ARMS,3,3)
+
+
+def _reframe_pose16(pose16: np.ndarray, w_mats: np.ndarray) -> np.ndarray:
+    """Left-apply per-arm rotation ``w_mats`` to every pose (position + orientation).
+
+    pose16: (...,16) two-arm [pos3, quat_wxyz4, grip1] per arm. Gripper is untouched.
+    Pass the transposed mats to invert the reframe.
+    """
+    pose16 = np.asarray(pose16, dtype=np.float64)
+    arms = []
+    for a in range(N_ARMS):
+        sl = slice(a * ARM_DIM, (a + 1) * ARM_DIM)
+        block = pose16[..., sl]
+        pos = np.einsum("ij,...j->...i", w_mats[a], block[..., _POS])
+        rot = np.einsum("ij,...jk->...ik", w_mats[a], _quat_wxyz_to_mat(block[..., _QUAT_WXYZ]))
+        arms.append(np.concatenate([pos, _mat_to_quat_wxyz(rot), block[..., _GRIP, None]], axis=-1))
+    return np.concatenate(arms, axis=-1)
+
+
 # PLACEHOLDER_CLASSES
 @dataclasses.dataclass(frozen=True)
 class UmiDualArmInputs(transforms.DataTransformFn):
@@ -174,10 +206,20 @@ class UmiDualArmInputs(transforms.DataTransformFn):
     """
 
     model_type: _model.ModelType
+    # Optional Option-2 world reframe: per-arm constant rotation W as a (w,x,y,z)
+    # quaternion, e.g. ((wl,xl,yl,zl), (wr,xr,yr,zr)). None -> no reframe.
+    world_reframe_quat_wxyz: tuple | None = None
 
     def __call__(self, data: dict) -> dict:
         # 23-dim raw state -> 16-dim two-arm pose (drops 7 ego dims, keeps quat).
         state = _raw23_to_pose16(np.asarray(data["state"], dtype=np.float64))  # (16,)
+
+        # Option 2: move the absolute state off the quaternion discontinuity. The
+        # relative action target is invariant, so we reframe state AND actions by the
+        # same W and relativize in the W-frame -> identical rel targets.
+        w_mats = _reframe_mats(self.world_reframe_quat_wxyz) if self.world_reframe_quat_wxyz is not None else None
+        if w_mats is not None:
+            state = _reframe_pose16(state, w_mats)
 
         left_wrist = _parse_image(data["left_wrist_image"])
         right_wrist = _parse_image(data["right_wrist_image"])
@@ -200,6 +242,8 @@ class UmiDualArmInputs(transforms.DataTransformFn):
         if "actions" in data:
             # (T,23) raw absolute -> (T,16) -> UMI relative trajectory in SE(3).
             actions = _raw23_to_pose16(np.asarray(data["actions"], dtype=np.float64))
+            if w_mats is not None:
+                actions = _reframe_pose16(actions, w_mats)
             inputs["actions"] = _relativize_actions(state, actions).astype(np.float32)
 
         if "prompt" in data:
@@ -212,7 +256,16 @@ class UmiDualArmInputs(transforms.DataTransformFn):
 class UmiDualArmOutputs(transforms.DataTransformFn):
     """Converts the model's relative action chunk back to absolute EE poses."""
 
+    # Must match the value on UmiDualArmInputs. When set, the absolutize runs in the
+    # W-frame (the model's state feature lives there), then inv(W) maps the result back
+    # to the original frame so the deployed runtime sees the same poses as v1/v2.
+    world_reframe_quat_wxyz: tuple | None = None
+
     def __call__(self, data: dict) -> dict:
         state = np.asarray(data["state"], dtype=np.float64)[:STATE_DIM]
         rel = np.asarray(data["actions"], dtype=np.float64)[:, :STATE_DIM]
-        return {"actions": _absolutize_actions(state, rel).astype(np.float32)}
+        abs_actions = _absolutize_actions(state, rel)
+        if self.world_reframe_quat_wxyz is not None:
+            w_mats = _reframe_mats(self.world_reframe_quat_wxyz)
+            abs_actions = _reframe_pose16(abs_actions, np.swapaxes(w_mats, -1, -2))  # inv(W) -> true frame
+        return {"actions": abs_actions.astype(np.float32)}
