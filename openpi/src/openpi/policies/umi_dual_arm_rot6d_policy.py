@@ -2,7 +2,7 @@
 
 This is the 6D-rotation sibling of ``umi_dual_arm_policy.py`` (which keeps the
 rotation as a quaternion). The 6D representation (Zhou et al. 2019, the first two
-columns of the rotation matrix, reconstructed via Gram-Schmidt) is **continuous
+**rows** of the rotation matrix, reconstructed via Gram-Schmidt) is **continuous
 everywhere on SO(3)** -- it has no double cover and no w=0 / 180deg sign-flip
 discontinuity -- so it is the principled choice when the orientation data is
 spread out or approaches half-turns. It is also free at the model: pi0 zero-pads
@@ -15,22 +15,28 @@ The on-disk LeRobot dataset is consumed *as-is* (no offline conversion); per fra
     observation.images.image : head cam (loaded by LeRobot but dropped here)
 
 ``UmiDualArmInputs`` slices the 23-dim vector to a 20-dim two-arm pose -- per arm
-[pos3, rot6d6, grip1] -- by dropping the last 7 ego dims and converting each arm's
-quaternion (wxyz) to rot6d. It then maps everything into pi0's expected dict and
--- crucially -- converts the absolute action *chunk* into a UMI relative trajectory:
-every pose in the chunk is expressed in the frame of the current observation pose,
+[pos3, rot6d6, grip1] -- by dropping the last 7 ego dims. Following UMI exactly,
+the rotation is processed in SE(3) and only flattened to 6D **last**:
 
-    T_rel = inv(T_obs) @ T_action
+  * STATE  : per arm quat -> 3x3 matrix -> rot6d (rows). Kept ABSOLUTE.
+  * ACTIONS: per arm the matrix is built directly from the quaternion, then the
+             chunk is relativized in SE(3) against the current observation pose,
 
-per arm, composed in SE(3) on the rotation matrix. The gripper width is left
-absolute. This is the load-time equivalent of pi0's linear ``DeltaActions`` but
-composed in SE(3) -- so pi0's built-in delta transform MUST stay OFF for this dataset.
+                 T_rel = inv(T_obs) @ T_action
+
+             and the *relative matrix* is converted to rot6d (rows) only at the
+             end. No intermediate quat->rot6d->matrix round-trip on the actions.
+
+The gripper width is left absolute. This load-time relativization is the
+equivalent of pi0's linear ``DeltaActions`` but composed in SE(3) -- so pi0's
+built-in delta transform MUST stay OFF for this dataset.
 
 ``UmiDualArmOutputs`` inverts the relativization at inference: given the current
-(20-dim, post-input-transform) state and the model's relative action chunk, it
-returns absolute 20-dim poses. The model's predicted 6D vector need not be
-orthonormal -- Gram-Schmidt re-orthonormalizes it when lifting back to a matrix.
-The deployed runtime is responsible for any final 20-dim -> robot-native conversion.
+(20-dim, post-input-transform) rot6d state and the model's relative rot6d action
+chunk, it returns absolute 20-dim poses. The model's predicted 6D vector need not
+be orthonormal -- Gram-Schmidt re-orthonormalizes it when lifting back to a
+matrix. The deployed runtime is responsible for any final 20-dim -> robot-native
+conversion.
 """
 
 import dataclasses
@@ -42,13 +48,20 @@ from scipy.spatial.transform import Rotation
 from openpi import transforms
 from openpi.models import model as _model
 
-# Per-arm layout within the 10-dim block.
+# Per-arm OUTPUT layout (rot6d): [pos3, rot6d6, grip1].
 _POS = slice(0, 3)
 _ROT6D = slice(3, 9)
 _GRIP = 9
 ARM_DIM = 10
 N_ARMS = 2
 STATE_DIM = ARM_DIM * N_ARMS  # 20
+
+# Per-arm INTERMEDIATE quaternion layout: [pos3, quat_wxyz4, grip1].
+_Q_POS = slice(0, 3)
+_Q_QUAT_WXYZ = slice(3, 7)
+_Q_GRIP = 7
+QUAT_ARM_DIM = 8
+QUAT_STATE_DIM = QUAT_ARM_DIM * N_ARMS  # 16
 
 # Raw 23-dim layout in the LeRobot dataset (per meta/info.json of the
 # earphone-style dataset). Indices below index into the raw vector.
@@ -63,12 +76,15 @@ _RAW_RIGHT_GRIP = 15
 
 # --------------------------------------------------------------------------- #
 # rotation-6D / SE(3) helpers (numpy + scipy).
+#
+# Convention: the 6D vector is the first two **ROWS** of the rotation matrix
+# (matching UMI's ``mat_to_rot6d`` / ``rot6d_to_mat``), NOT the first two columns.
 # --------------------------------------------------------------------------- #
 def _rot6d_to_mat(rot6d: np.ndarray) -> np.ndarray:
-    """[..., 6] (two stacked columns) -> 3x3 rotation matrix via Gram-Schmidt.
+    """[..., 6] (two stacked ROWS) -> 3x3 rotation matrix via Gram-Schmidt.
 
     Re-orthonormalizes defensively, so a non-orthonormal predicted 6D vector still
-    decodes to a valid rotation.
+    decodes to a valid rotation. ``b1, b2, b3`` become the rows of the matrix.
     """
     a1 = rot6d[..., 0:3]
     a2 = rot6d[..., 3:6]
@@ -76,12 +92,12 @@ def _rot6d_to_mat(rot6d: np.ndarray) -> np.ndarray:
     a2 = a2 - np.sum(b1 * a2, axis=-1, keepdims=True) * b1
     b2 = a2 / np.linalg.norm(a2, axis=-1, keepdims=True)
     b3 = np.cross(b1, b2)
-    return np.stack([b1, b2, b3], axis=-1)
+    return np.stack([b1, b2, b3], axis=-2)
 
 
 def _mat_to_rot6d(mat: np.ndarray) -> np.ndarray:
-    """3x3 rotation matrix -> [..., 6] (its first two columns)."""
-    return np.concatenate([mat[..., :, 0], mat[..., :, 1]], axis=-1)
+    """3x3 rotation matrix -> [..., 6] (its first two ROWS)."""
+    return np.concatenate([mat[..., 0, :], mat[..., 1, :]], axis=-1)
 
 
 def _quat_wxyz_to_mat(quat_wxyz: np.ndarray) -> np.ndarray:
@@ -91,7 +107,19 @@ def _quat_wxyz_to_mat(quat_wxyz: np.ndarray) -> np.ndarray:
     return Rotation.from_quat(quat_xyzw).as_matrix()
 
 
-def _pose10_to_mat(pose10: np.ndarray) -> np.ndarray:
+def _quatpose_to_mat(pose8: np.ndarray) -> np.ndarray:
+    """(...,8)=[pos3,quat_wxyz4,grip1] -> (4x4 mat). Grip column is ignored.
+
+    Builds the SE(3) matrix directly from the quaternion (no rot6d round-trip).
+    """
+    out = np.zeros(pose8.shape[:-1] + (4, 4), dtype=np.float64)
+    out[..., :3, :3] = _quat_wxyz_to_mat(pose8[..., _Q_QUAT_WXYZ])
+    out[..., :3, 3] = pose8[..., _Q_POS]
+    out[..., 3, 3] = 1.0
+    return out
+
+
+def _rot6dpose_to_mat(pose10: np.ndarray) -> np.ndarray:
     """(...,10)=[pos3,rot6d6,grip1] -> (4x4 mat). Grip column is ignored."""
     out = np.zeros(pose10.shape[:-1] + (4, 4), dtype=np.float64)
     out[..., :3, :3] = _rot6d_to_mat(pose10[..., _ROT6D])
@@ -101,7 +129,7 @@ def _pose10_to_mat(pose10: np.ndarray) -> np.ndarray:
 
 
 def _mat_to_pose9(mat: np.ndarray) -> np.ndarray:
-    """(...,4,4) -> (...,9) = [pos3, rot6d6]."""
+    """(...,4,4) -> (...,9) = [pos3, rot6d6] (rows convention)."""
     return np.concatenate([mat[..., :3, 3], _mat_to_rot6d(mat[..., :3, :3])], axis=-1)
 
 
@@ -116,31 +144,42 @@ def _mat_inv(mat: np.ndarray) -> np.ndarray:
     return out
 
 
-def _relativize_actions(state: np.ndarray, actions: np.ndarray) -> np.ndarray:
+def _relativize_actions(state_quat: np.ndarray, actions_quat: np.ndarray) -> np.ndarray:
     """Express each action pose relative to the current state pose, per arm (UMI).
 
-    state: (20,) current absolute EE pose. actions: (T,20) absolute targets.
+    Inputs are in the intermediate QUATERNION layout; the SE(3) matrix is built
+    directly from the quaternion, the chunk is relativized, and only the relative
+    matrix is converted to rot6d (rows) -- i.e. rot6d is produced last.
+
+    state_quat: (16,) current absolute EE pose [pos3,quat4,grip1] per arm.
+    actions_quat: (T,16) absolute targets, same layout.
     Returns (T,20): per arm [rel_pos3, rel_rot6d6, grip1] (gripper stays absolute).
     """
-    out = np.empty_like(actions)
+    out = np.empty((actions_quat.shape[0], STATE_DIM), dtype=np.float64)
     for a in range(N_ARMS):
-        sl = slice(a * ARM_DIM, (a + 1) * ARM_DIM)
-        block = actions[:, sl]
-        base = _pose10_to_mat(state[sl])  # (4,4)
-        act = _pose10_to_mat(block)  # (T,4,4)
+        sl_q = slice(a * QUAT_ARM_DIM, (a + 1) * QUAT_ARM_DIM)
+        sl_o = slice(a * ARM_DIM, (a + 1) * ARM_DIM)
+        block = actions_quat[:, sl_q]
+        base = _quatpose_to_mat(state_quat[sl_q])  # (4,4), built from quat
+        act = _quatpose_to_mat(block)  # (T,4,4), built from quat
         rel = _mat_inv(base)[None] @ act  # (T,4,4)
-        out[:, sl] = np.concatenate([_mat_to_pose9(rel), block[:, _GRIP, None]], axis=-1)
+        out[:, sl_o] = np.concatenate([_mat_to_pose9(rel), block[:, _Q_GRIP, None]], axis=-1)
     return out
 
 
-def _absolutize_actions(state: np.ndarray, rel_actions: np.ndarray) -> np.ndarray:
-    """Inverse of :func:`_relativize_actions` (inference path)."""
+def _absolutize_actions(state_rot6d: np.ndarray, rel_actions: np.ndarray) -> np.ndarray:
+    """Inverse of :func:`_relativize_actions` (inference path).
+
+    Operates in the rot6d layout: the (post-input-transform) state and the model's
+    relative chunk are both rot6d (rows). Lifts to SE(3), composes ``base @ rel``,
+    and reads back rot6d (rows).
+    """
     out = np.empty_like(rel_actions)
     for a in range(N_ARMS):
         sl = slice(a * ARM_DIM, (a + 1) * ARM_DIM)
         block = rel_actions[:, sl]
-        base = _pose10_to_mat(state[sl])  # (4,4)
-        rel = _pose10_to_mat(block)  # (T,4,4); grip column ignored by _pose10_to_mat
+        base = _rot6dpose_to_mat(state_rot6d[sl])  # (4,4)
+        rel = _rot6dpose_to_mat(block)  # (T,4,4); grip column ignored
         absm = base[None] @ rel
         out[:, sl] = np.concatenate([_mat_to_pose9(absm), block[:, _GRIP, None]], axis=-1)
     return out
@@ -155,23 +194,36 @@ def _parse_image(image) -> np.ndarray:
     return image
 
 
-def _arm_raw_to_pose10(pos: np.ndarray, quat_wxyz: np.ndarray, grip: np.ndarray) -> np.ndarray:
-    """(...,3),(...,4 wxyz),(...,) -> (...,10) = [pos3, rot6d6, grip1]."""
-    rot = _quat_wxyz_to_mat(quat_wxyz)  # (...,3,3)
-    rot6d = np.concatenate([rot[..., :, 0], rot[..., :, 1]], axis=-1)
-    return np.concatenate([pos, rot6d, grip[..., None]], axis=-1)
+def _raw23_to_quatpose16(vec23: np.ndarray) -> np.ndarray:
+    """Raw (...,23) two-arm + ego state/action -> (...,16) two-arm quaternion pose.
 
-
-def _raw23_to_pose20(vec23: np.ndarray) -> np.ndarray:
-    """Raw (...,23) two-arm + ego state/action -> (...,20) two-arm 6D pose.
-
-    Drops the trailing 7 ego dims; converts each arm's wxyz quaternion to rot6d.
+    Drops the trailing 7 ego dims; keeps each arm's (w,x,y,z) quaternion as-is.
+    The quat->rot6d conversion is deliberately deferred (done last, after SE(3)).
     """
-    left = _arm_raw_to_pose10(vec23[..., _RAW_LEFT_POS], vec23[..., _RAW_LEFT_QUAT_WXYZ], vec23[..., _RAW_LEFT_GRIP])
-    right = _arm_raw_to_pose10(
-        vec23[..., _RAW_RIGHT_POS], vec23[..., _RAW_RIGHT_QUAT_WXYZ], vec23[..., _RAW_RIGHT_GRIP]
+    left = np.concatenate(
+        [vec23[..., _RAW_LEFT_POS], vec23[..., _RAW_LEFT_QUAT_WXYZ], vec23[..., _RAW_LEFT_GRIP, None]],
+        axis=-1,
+    )
+    right = np.concatenate(
+        [vec23[..., _RAW_RIGHT_POS], vec23[..., _RAW_RIGHT_QUAT_WXYZ], vec23[..., _RAW_RIGHT_GRIP, None]],
+        axis=-1,
     )
     return np.concatenate([left, right], axis=-1)
+
+
+def _quatpose16_to_rot6d20(pose16: np.ndarray) -> np.ndarray:
+    """(...,16)=[pos3,quat4,grip1] per arm -> (...,20)=[pos3,rot6d6,grip1] per arm.
+
+    Builds the matrix from the quaternion, then flattens to rot6d (rows) last.
+    Used for the ABSOLUTE state feature (no relativization).
+    """
+    arms = []
+    for a in range(N_ARMS):
+        sl = slice(a * QUAT_ARM_DIM, (a + 1) * QUAT_ARM_DIM)
+        block = pose16[..., sl]
+        rot6d = _mat_to_rot6d(_quat_wxyz_to_mat(block[..., _Q_QUAT_WXYZ]))
+        arms.append(np.concatenate([block[..., _Q_POS], rot6d, block[..., _Q_GRIP, None]], axis=-1))
+    return np.concatenate(arms, axis=-1)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -185,8 +237,10 @@ class UmiDualArmInputs(transforms.DataTransformFn):
     model_type: _model.ModelType
 
     def __call__(self, data: dict) -> dict:
-        # 23-dim raw state -> 20-dim two-arm 6D pose (drops 7 ego dims).
-        state = _raw23_to_pose20(np.asarray(data["state"], dtype=np.float64))  # (20,)
+        # 23-dim raw -> 16-dim two-arm QUATERNION pose (drops 7 ego dims).
+        state_quat = _raw23_to_quatpose16(np.asarray(data["state"], dtype=np.float64))  # (16,)
+        # ABSOLUTE state for the model: quat -> matrix -> rot6d (rows), last.
+        state = _quatpose16_to_rot6d20(state_quat)  # (20,)
 
         left_wrist = _parse_image(data["left_wrist_image"])
         right_wrist = _parse_image(data["right_wrist_image"])
@@ -207,9 +261,10 @@ class UmiDualArmInputs(transforms.DataTransformFn):
         }
 
         if "actions" in data:
-            # (T,23) raw absolute -> (T,20) -> UMI relative trajectory in SE(3).
-            actions = _raw23_to_pose20(np.asarray(data["actions"], dtype=np.float64))
-            inputs["actions"] = _relativize_actions(state, actions).astype(np.float32)
+            # (T,23) raw absolute -> (T,16) quat -> matrix-from-quat -> SE(3)
+            # relativize -> rot6d (rows) last -> (T,20) UMI relative trajectory.
+            actions_quat = _raw23_to_quatpose16(np.asarray(data["actions"], dtype=np.float64))
+            inputs["actions"] = _relativize_actions(state_quat, actions_quat).astype(np.float32)
 
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]

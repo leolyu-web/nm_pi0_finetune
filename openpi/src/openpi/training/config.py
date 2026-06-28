@@ -398,7 +398,7 @@ class UmiDualArmDataConfig(DataConfigFactory):
             ]
         )
 
-        # Inputs handle the 23->20 slicing AND the UMI relativization in SE(3);
+        # Inputs handle the 23->16 slicing AND the UMI relativization in SE(3);
         # outputs invert the relativization at inference. NOTE: we deliberately
         # do NOT push DeltaActions/AbsoluteActions here -- the relative
         # trajectory is already produced by UmiDualArmInputs.
