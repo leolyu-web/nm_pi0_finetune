@@ -174,8 +174,8 @@ def _raw23_to_pose16(vec23: np.ndarray) -> np.ndarray:
 # norm_stats MUST be recomputed for any config that sets this.
 # --------------------------------------------------------------------------- #
 def _reframe_mats(quat_wxyz_per_arm) -> np.ndarray:
-    """((w,x,y,z) per arm) -> (N_ARMS,3,3) rotation matrices W to left-apply."""
-    q = np.asarray(quat_wxyz_per_arm, dtype=np.float64)  # (N_ARMS,4)
+    """Per-arm (w,x,y,z), flat (8,) or nested (2,4) -> (N_ARMS,3,3) rotation mats W."""
+    q = np.asarray(quat_wxyz_per_arm, dtype=np.float64).reshape(N_ARMS, 4)
     return _quat_wxyz_to_mat(q)  # (N_ARMS,3,3)
 
 

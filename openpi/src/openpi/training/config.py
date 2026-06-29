@@ -377,7 +377,9 @@ class UmiDualArmDataConfig(DataConfigFactory):
     # discontinuity. Relative action targets are invariant; only the absolute STATE
     # feature moves, so a config that sets this MUST recompute norm_stats (and should
     # use its own asset_id). None -> no reframe (v1/v2 behavior).
-    world_reframe_quat_wxyz: tuple | None = None
+    # Flat 8 floats (wl,xl,yl,zl, wr,xr,yr,zr); reshaped to per-arm (2,4) in the
+    # transform. (Flat, not nested, because tyro cannot serialize nested-tuple defaults.)
+    world_reframe_quat_wxyz: tyro.conf.Suppress[tuple[float, ...] | None] = None
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
@@ -878,9 +880,10 @@ _CONFIGS = [
             # Distinct asset_id so reframed norm stats don't collide with pi0_umi_dual_arm.
             assets=AssetsConfig(asset_id="earphone_0620_reframe"),
             # Per-arm W = inv(mean orientation), computed from the earphone dataset.
+            # Flat (wl,xl,yl,zl, wr,xr,yr,zr); reshaped to (2,4) in the transform.
             world_reframe_quat_wxyz=(
-                (0.45594531, -0.03043296, -0.23385571, 0.85819533),  # left
-                (0.45044910, -0.75766090, 0.41203593, -0.23080718),  # right
+                0.45594531, -0.03043296, -0.23385571, 0.85819533,  # left
+                0.45044910, -0.75766090, 0.41203593, -0.23080718,  # right
             ),
             base_config=DataConfig(
                 prompt_from_task=True,
