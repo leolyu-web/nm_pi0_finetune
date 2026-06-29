@@ -825,20 +825,36 @@ _CONFIGS = [
     # count, prompt language), the transforms in
     # src/openpi/policies/umi_dual_arm_policy.py must be edited as well.
     #
+    # TrainConfig(
+    #     name="pi0_umi_dual_arm_v2",
+    #     model=pi0_config.Pi0Config(),
+    #     data=UmiDualArmDataConfig(
+    #         # CHANGE ME: absolute path to your new dataset.
+    #         repo_id="/home/it002338/Junlin_lv/pi0/CHANGE_ME_dataset",
+    #         # CHANGE ME: short unique label so norm stats don't collide with other datasets.
+    #         assets=AssetsConfig(asset_id="CHANGE_ME"),
+    #         base_config=DataConfig(
+    #             prompt_from_task=True,
+    #         ),
+    #     ),
+    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+    #     num_train_steps=30_000,
+    # ),
     TrainConfig(
         name="pi0_umi_dual_arm_v2",
-        model=pi0_config.Pi0Config(),
+        model=pi0_config.Pi0Config(action_horizon=48),
         data=UmiDualArmDataConfig(
             # CHANGE ME: absolute path to your new dataset.
-            repo_id="/home/it002338/Junlin_lv/pi0/CHANGE_ME_dataset",
+            repo_id="/mnt/nm_dataset/dataset/giftbox_0621_1758episodes",
             # CHANGE ME: short unique label so norm stats don't collide with other datasets.
-            assets=AssetsConfig(asset_id="CHANGE_ME"),
+            assets=AssetsConfig(asset_id="giftbox_0621_1758"),
             base_config=DataConfig(
                 prompt_from_task=True,
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
+        num_workers=8,
     ),
     #
     # Same as pi0_umi_dual_arm (earphone dataset, full fine-tune) but with the
@@ -888,16 +904,17 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi0_umi_dual_arm_v4",
-        model=pi0_config.Pi0Config(),
+        model=pi0_config.Pi0Config(action_horizon=48),
         data=UmiDualArmRot6dDataConfig(
-            repo_id="/home/it002338/Junlin_lv/pi0/earphone_0620_316episodes",
-            assets=AssetsConfig(asset_id="earphone_0620_rot6d"),
+            repo_id="/mnt/nm_dataset/dataset/giftbox_0621_1758episodes",
+            assets=AssetsConfig(asset_id="giftbox_0621_1758"),
             base_config=DataConfig(
                 prompt_from_task=True,
             ),
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
+        num_workers=8,
     ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",
