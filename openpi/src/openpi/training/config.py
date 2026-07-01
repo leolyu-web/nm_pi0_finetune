@@ -394,6 +394,12 @@ class UmiDualArmDataConfig(DataConfigFactory):
     # masked. Lets the policy condition on height while blind to planar position.
     keep_z_position_in_state: bool = False
 
+    # Reproduce a teleop data bug: overwrite every action's gripper (per arm) with
+    # the current observation gripper, so the model regresses "hold current gripper"
+    # instead of the recorded (buggy) target. Pose dims are untouched; only training
+    # targets are affected. Recompute norm_stats (action gripper distribution moves).
+    gripper_action_equals_state: bool = False
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         # Remap the raw LeRobot dataset keys to the keys ``UmiDualArmInputs``
@@ -424,6 +430,7 @@ class UmiDualArmDataConfig(DataConfigFactory):
                     world_reframe_quat_wxyz=self.world_reframe_quat_wxyz,
                     mask_absolute_state_pose=self.mask_absolute_state_pose,
                     keep_z_position_in_state=self.keep_z_position_in_state,
+                    gripper_action_equals_state=self.gripper_action_equals_state,
                 )
             ],
             outputs=[umi_dual_arm_policy.UmiDualArmOutputs(world_reframe_quat_wxyz=self.world_reframe_quat_wxyz)],
@@ -925,6 +932,29 @@ _CONFIGS = [
             ),
             # Full 16-dim absolute pose in the state (default: no masking).
             mask_absolute_state_pose=False,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        num_workers=8,
+    ),
+    #
+    # Teleop gripper-bug variant of pi05_umi_dual_arm_quat_allaxis: identical config
+    # (full 16-dim absolute pose in state), except every action's gripper is pinned
+    # to the current observation gripper (per arm) -- reproducing a teleop data bug
+    # where the recorded gripper action echoed the state instead of a target. Pose
+    # dims are unchanged. Recompute norm_stats for this config.
+    #
+    TrainConfig(
+        name="pi05_umi_dual_arm_quat_allaxis_teleo_gripbug",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input="False"),
+        data=UmiDualArmDataConfig(
+            repo_id="/mnt/nm_dataset/dataset/giftbox_0628_1912episodes_qc_accept",
+            assets=AssetsConfig(asset_id="giftbox_0628_1912episodes_qc_accept"),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+            mask_absolute_state_pose=False,
+            gripper_action_equals_state=True,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,

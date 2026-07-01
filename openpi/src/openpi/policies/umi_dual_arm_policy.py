@@ -217,6 +217,12 @@ class UmiDualArmInputs(transforms.DataTransformFn):
     # masked). Lets the policy condition on height while staying blind to absolute
     # planar position + orientation.
     keep_z_position_in_state: bool = False
+    # Reproduce a teleop data bug where the recorded gripper ACTION echoed the
+    # current gripper STATE instead of a target. When True, every action's gripper
+    # (per arm) is overwritten with the observation gripper, so the model regresses
+    # "hold current gripper" rather than the recorded (buggy) target. Pose dims are
+    # untouched. Only affects the training targets (inference has no actions).
+    gripper_action_equals_state: bool = False
 
     def __call__(self, data: dict) -> dict:
         # 23-dim raw state -> 16-dim two-arm pose (drops 7 ego dims, keeps quat).
@@ -266,7 +272,14 @@ class UmiDualArmInputs(transforms.DataTransformFn):
             actions = _raw23_to_pose16(np.asarray(data["actions"], dtype=np.float64))
             if w_mats is not None:
                 actions = _reframe_pose16(actions, w_mats)
-            inputs["actions"] = _relativize_actions(state, actions).astype(np.float32)
+            rel = _relativize_actions(state, actions)
+            if self.gripper_action_equals_state:
+                # Teleop gripper bug: pin every action's gripper to the current
+                # (observation) gripper, per arm. Pose dims are left as-is.
+                for a in range(N_ARMS):
+                    g = a * ARM_DIM + _GRIP
+                    rel[:, g] = state[g]
+            inputs["actions"] = rel.astype(np.float32)
         elif self.mask_absolute_state_pose:
             # Inference path (no actions): the model no longer sees the absolute pose,
             # so carry the true (post-reframe) pose through a side channel for the

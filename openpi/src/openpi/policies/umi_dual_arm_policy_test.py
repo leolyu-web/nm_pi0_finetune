@@ -326,6 +326,27 @@ def test_mask_keep_z_keeps_height_only():
     np.testing.assert_array_equal(masked["actions"], plain["actions"])
 
 
+def test_gripper_action_equals_state_pins_gripper():
+    """Teleop gripper-bug: every action's gripper equals the observation gripper
+    (per arm) for all timesteps, while the pose dims match the plain relativization."""
+    rng = np.random.default_rng(15)
+    data = _make_data(rng, horizon=9)
+
+    plain = umi.UmiDualArmInputs(model_type=_model.ModelType.PI0)(data)
+    bug = umi.UmiDualArmInputs(model_type=_model.ModelType.PI0, gripper_action_equals_state=True)(data)
+
+    state16 = umi._raw23_to_pose16(data["state"].astype(np.float64))
+    for a in range(umi.N_ARMS):
+        base = a * umi.ARM_DIM
+        g = base + umi._GRIP
+        # Gripper pinned to the (constant) observation gripper across the whole chunk.
+        np.testing.assert_allclose(bug["actions"][:, g], np.float32(state16[g]), atol=1e-6)
+        # Pose dims (pos + quat) are untouched vs the plain relativization.
+        np.testing.assert_array_equal(bug["actions"][:, base : base + 7], plain["actions"][:, base : base + 7])
+    # State feature is unchanged (this variant only rewrites action grippers).
+    np.testing.assert_array_equal(bug["state"], plain["state"])
+
+
 def test_mask_without_side_channel_fails_loudly():
     """Sanity: absolutizing from the masked state (no side channel) cannot recover
     the true poses -- the zeroed base orientation is an invalid quaternion, so it
