@@ -212,6 +212,11 @@ class UmiDualArmInputs(transforms.DataTransformFn):
     # UmiDualArmOutputs can still absolutize (no deployed-runtime change). A config
     # that sets this MUST recompute norm_stats (the state distribution changes).
     mask_absolute_state_pose: bool = False
+    # Only meaningful with ``mask_absolute_state_pose``: keep the per-arm absolute
+    # z (height) position in the model's state feature (x, y, and orientation stay
+    # masked). Lets the policy condition on height while staying blind to absolute
+    # planar position + orientation.
+    keep_z_position_in_state: bool = False
 
     def __call__(self, data: dict) -> dict:
         # 23-dim raw state -> 16-dim two-arm pose (drops 7 ego dims, keeps quat).
@@ -236,8 +241,10 @@ class UmiDualArmInputs(transforms.DataTransformFn):
         if self.mask_absolute_state_pose:
             model_state = np.zeros_like(state)
             for a in range(N_ARMS):
-                grip = a * ARM_DIM + _GRIP
-                model_state[grip] = state[grip]
+                base = a * ARM_DIM
+                model_state[base + _GRIP] = state[base + _GRIP]
+                if self.keep_z_position_in_state:
+                    model_state[base + _POS.start + 2] = state[base + _POS.start + 2]  # absolute z (height)
 
         mask_base = np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_
         inputs = {

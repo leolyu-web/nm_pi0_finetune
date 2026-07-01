@@ -303,6 +303,29 @@ def test_mask_inference_side_channel_absolutizes_correctly():
         np.testing.assert_allclose(got, want, atol=1e-5)
 
 
+def test_mask_keep_z_keeps_height_only():
+    """z-axis variant: with masking + keep_z, the model state keeps per-arm absolute
+    z (height) and gripper; x, y, and orientation stay zeroed. Actions and the
+    absolutize side channel are unaffected."""
+    rng = np.random.default_rng(14)
+    data = _make_data(rng, horizon=7)
+
+    plain = umi.UmiDualArmInputs(model_type=_model.ModelType.PI0)(data)
+    masked = umi.UmiDualArmInputs(
+        model_type=_model.ModelType.PI0, mask_absolute_state_pose=True, keep_z_position_in_state=True
+    )(data)
+
+    for a in range(umi.N_ARMS):
+        base = a * umi.ARM_DIM
+        # x, y zeroed; z (index 2) preserved; quaternion zeroed; gripper preserved.
+        np.testing.assert_array_equal(masked["state"][base : base + 2], np.zeros(2, dtype=np.float32))
+        assert masked["state"][base + 2] == plain["state"][base + 2]  # absolute z kept
+        np.testing.assert_array_equal(masked["state"][base + 3 : base + 7], np.zeros(4, dtype=np.float32))
+        assert masked["state"][base + umi._GRIP] == plain["state"][base + umi._GRIP]
+    # Relativized action target unchanged by any state masking.
+    np.testing.assert_array_equal(masked["actions"], plain["actions"])
+
+
 def test_mask_without_side_channel_fails_loudly():
     """Sanity: absolutizing from the masked state (no side channel) cannot recover
     the true poses -- the zeroed base orientation is an invalid quaternion, so it

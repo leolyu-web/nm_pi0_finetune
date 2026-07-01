@@ -389,6 +389,11 @@ class UmiDualArmDataConfig(DataConfigFactory):
     # this MUST recompute norm_stats (the state distribution changes).
     mask_absolute_state_pose: bool = False
 
+    # Only meaningful with ``mask_absolute_state_pose``: keep the per-arm absolute z
+    # (height) position in the model's state feature; x, y, and orientation stay
+    # masked. Lets the policy condition on height while blind to planar position.
+    keep_z_position_in_state: bool = False
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         # Remap the raw LeRobot dataset keys to the keys ``UmiDualArmInputs``
@@ -418,6 +423,7 @@ class UmiDualArmDataConfig(DataConfigFactory):
                     model_type=model_config.model_type,
                     world_reframe_quat_wxyz=self.world_reframe_quat_wxyz,
                     mask_absolute_state_pose=self.mask_absolute_state_pose,
+                    keep_z_position_in_state=self.keep_z_position_in_state,
                 )
             ],
             outputs=[umi_dual_arm_policy.UmiDualArmOutputs(world_reframe_quat_wxyz=self.world_reframe_quat_wxyz)],
@@ -874,6 +880,31 @@ _CONFIGS = [
     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
     num_train_steps=30_000,
     num_workers=8,
+    ),
+    #
+    # z-axis variant of pi05_umi_dual_arm_quat: the state keeps the per-arm absolute
+    # z (height) position and gripper; x, y, and orientation are masked out. Middle
+    # ground between pi05_umi_dual_arm_quat (no absolute pose) and the pi0 quat config
+    # (full absolute pose). Same dataset/asset_id -- norm stats are namespaced by
+    # config NAME, so no collision. Actions relativization + inference absolutization
+    # are unchanged (the full true pose still flows via the absolute_state side
+    # channel). norm_stats MUST be recomputed for this config.
+    #
+    TrainConfig(
+        name="pi05_umi_dual_arm_quat_zaxis",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input="False"),
+        data=UmiDualArmDataConfig(
+            repo_id="/mnt/nm_dataset/dataset/giftbox_0628_1912episodes_qc_accept",
+            assets=AssetsConfig(asset_id="giftbox_0628_1912episodes_qc_accept"),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+            mask_absolute_state_pose=True,
+            keep_z_position_in_state=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        num_workers=8,
     ),
     #
     # 6D-rotation sibling of pi05_umi_dual_arm_quat (pi0.5 base). Same dataset and
