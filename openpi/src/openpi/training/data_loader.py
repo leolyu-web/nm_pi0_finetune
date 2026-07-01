@@ -127,10 +127,52 @@ class FakeDataset(Dataset):
         return self._num_samples
 
 
+class _NoVideoLeRobotDataset(lerobot_dataset.LeRobotDataset):
+    """LeRobotDataset that skips video frame decoding.
+
+    ``compute_norm_stats`` only sums ``state``/``actions`` over the dataset --
+    every decoded frame is thrown away. Video decode (ffmpeg + torchcodec) is the
+    dominant cost per sample (e.g. AV1 wrist videos at action_horizon=48 frames
+    per item). Returning empty placeholders for every video key cuts the inner
+    loop by ~10x without changing the resulting stats. The downstream UMI/Libero/
+    Aloha transforms read the image keys via the *repack* layer; for norm-stats
+    runs we keep the image keys present (so the repack doesn't KeyError) but
+    fill them with a tiny zero array. ``RemoveStrings`` in compute_norm_stats
+    drops them before the running-stats update -- but the policy ``Inputs``
+    transforms still run on them, so the placeholder must be a real ndarray.
+    """
+
+    def __getitem__(self, idx) -> dict:
+        item = self.hf_dataset[idx]
+        ep_idx = item["episode_index"].item()
+        if self.delta_indices is not None:
+            query_indices, padding = self._get_query_indices(idx, ep_idx)
+            query_result = self._query_hf_dataset(query_indices)
+            item = {**item, **padding}
+            for key, val in query_result.items():
+                item[key] = val
+        # Fill video keys with a tiny zero placeholder (shape matches CHW float
+        # so _parse_image works untouched, but the array is 3 bytes not 220KB).
+        for vid_key in self.meta.video_keys:
+            item[vid_key] = np.zeros((3, 1, 1), dtype=np.float32)
+        task_idx = item["task_index"].item()
+        item["task"] = self.meta.tasks[task_idx]
+        return item
+
+
 def create_torch_dataset(
-    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
+    *,
+    skip_videos: bool = False,
 ) -> Dataset:
-    """Create a dataset for training."""
+    """Create a dataset for training.
+
+    Set ``skip_videos=True`` to swap in a no-decode LeRobotDataset that fills
+    video keys with zero placeholders. Use ONLY for norm-stats: training reads
+    real frames, so leave it False there.
+    """
     repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
@@ -138,7 +180,8 @@ def create_torch_dataset(
         return FakeDataset(model_config, num_samples=1024)
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    dataset = lerobot_dataset.LeRobotDataset(
+    dataset_cls = _NoVideoLeRobotDataset if skip_videos else lerobot_dataset.LeRobotDataset
+    dataset = dataset_cls(
         data_config.repo_id,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys

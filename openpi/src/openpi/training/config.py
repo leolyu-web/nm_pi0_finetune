@@ -920,6 +920,22 @@ _CONFIGS = [
         num_workers=8,
     ),
     TrainConfig(
+    name="pi05_umi_dual_arm_v2",
+    # pi0.5: discrete state token + adaRMSNorm timestep injection.
+    # max_token_len bumps to 200 and discrete_state_input flips on automatically (see Pi0Config.__post_init__).
+    model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input="False"),
+    data=UmiDualArmDataConfig(
+        repo_id="/mnt/nm_dataset/dataset/giftbox_0628_1912episodes_qc_accept",
+        assets=AssetsConfig(asset_id="giftbox_0628_1912episodes_qc_accept"),
+        base_config=DataConfig(
+            prompt_from_task=True,
+        ),
+    ),
+    weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+    num_train_steps=30_000,
+    num_workers=8,
+    ),
+    TrainConfig(
         name="pi0_libero_low_mem_finetune",
         # Here is an example of loading a pi0 model for LoRA fine-tuning.
         model=pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora", action_expert_variant="gemma_300m_lora"),
