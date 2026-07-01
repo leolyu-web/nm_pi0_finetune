@@ -33,12 +33,12 @@ each chunk re-anchors, every chunk's relative pose starts near identity
 Example
 -------
     uv run offline_reasoning/offline_reasoning.py \
-        --checkpoint-dir checkpoints/pi0_umi_dual_arm/run1/29999 \
+        --checkpoint-dir checkpoints/pi0_umi_dual_arm_quat/run1/29999 \
         --episode 0
 
     uv run offline_reasoning/offline_reasoning.py \
-        --config-name pi0_umi_dual_arm_v4 \
-        --checkpoint-dir checkpoints/pi0_umi_dual_arm_v4/run1/29999 \
+        --config-name pi0_umi_dual_arm_6Drot \
+        --checkpoint-dir checkpoints/pi0_umi_dual_arm_6Drot/run1/29999 \
         --episode 0
 """
 
@@ -112,7 +112,7 @@ class Args:
     # Path to the fine-tuned checkpoint (the step folder, e.g. ``.../run1/29999``).
     checkpoint_dir: str
     # Train config name the checkpoint was produced with.
-    config_name: str = "pi0_umi_dual_arm"
+    config_name: str = "pi0_umi_dual_arm_quat"
     # Episode index to visualize.
     episode: int = 0
     # Override the dataset path. Defaults to the ``repo_id`` baked into the config.

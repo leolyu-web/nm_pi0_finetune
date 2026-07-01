@@ -34,7 +34,7 @@ export CUDA_VISIBLE_DEVICES=4,5,6,7
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9
 
 uv run offline_reasoning/offline_reasoning.py \
-    --checkpoint-dir checkpoints/pi0_umi_dual_arm/run1/29999 \
+    --checkpoint-dir checkpoints/pi0_umi_dual_arm_quat/run1/29999 \
     --episode 0
 ```
 
@@ -43,7 +43,7 @@ uv run offline_reasoning/offline_reasoning.py \
 | Flag | Default | Meaning |
 |---|---|---|
 | `--checkpoint-dir` | *(required)* | Fine-tuned checkpoint step folder. Must contain `assets/<asset_id>/norm_stats.json`. |
-| `--config-name` | `pi0_umi_dual_arm` | Train config the checkpoint was produced with. |
+| `--config-name` | `pi0_umi_dual_arm_quat` | Train config the checkpoint was produced with. |
 | `--episode` | `0` | Episode index to plot. |
 | `--repo-id` | config's `repo_id` | Override the dataset path. |
 | `--stride` | action horizon (50) | Frames between chunk starts. Lower → overlapping chunks. |

@@ -794,61 +794,29 @@ _CONFIGS = [
         num_train_steps=30_000,
     ),
     #
-    # Dual-arm dataset (UMI-style relative quaternion end-effector actions): full
-    # fine-tuning of pi0 base, two wrist cameras only (no head cam/ego).
-    # Reads the raw LeRobot dataset directly -- 23->16-dim slicing and the
-    # UMI relativization both happen at the transform layer. Task-agnostic;
-    # the earphone dataset is just one example.
+    # Dual-arm dataset (UMI-style SE(3)-relative end-effector actions): full
+    # fine-tuning of pi0 base, two wrist cameras only (no head cam/ego). Reads the
+    # raw LeRobot dataset directly -- 23-dim slicing and the UMI relativization both
+    # happen at the transform layer. Task-agnostic; giftbox is just one example.
+    #
+    # Two rotation representations are offered as sibling configs:
+    #   pi0_umi_dual_arm_quat  -- quaternion (per arm [pos3, quat4, grip1], 16-dim)
+    #   pi0_umi_dual_arm_6Drot -- continuous 6D rotation (per arm [pos3, rot6d6, grip1], 20-dim)
+    # 6D has no double cover / no w=0 sign-flip discontinuity and is the UMI-faithful
+    # choice; it is free at the model since pi0 zero-pads actions to action_dim=32.
+    # The two share a dataset/asset_id but norm stats are namespaced by config NAME,
+    # so they never collide. To onboard a new same-format dataset, change repo_id and
+    # asset_id, then:
+    #   uv run scripts/compute_norm_stats.py --config-name <name>
+    #   uv run scripts/train.py <name> --exp-name=... --fsdp-devices=4
+    # A DIFFERENT layout (state dims, camera keys, arm count) requires editing the
+    # transforms in src/openpi/policies/umi_dual_arm*_policy.py as well.
     #
     TrainConfig(
-        name="pi0_umi_dual_arm",
-        # Full fine-tuning of the pi0 base model.
-        model=pi0_config.Pi0Config(),
-        data=UmiDualArmDataConfig(
-            # Direct path to the earphone dataset (316 episodes, 199k frames).
-            repo_id="/home/it002338/Junlin_lv/pi0/earphone_0620_316episodes",
-            # Keep norm stats organized under a short asset_id instead of the full path.
-            assets=AssetsConfig(asset_id="earphone_0620"),
-            base_config=DataConfig(
-                prompt_from_task=True,
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
-        num_train_steps=30_000,
-    ),
-    #
-    # Template for fine-tuning on ANOTHER dual-arm dataset of the SAME format
-    # (LeRobot v2.1, 23-dim state/action, wrist_image_1 / wrist_image_2 videos).
-    # To use a new dataset, only change ``repo_id`` (absolute path to the dataset)
-    # and ``asset_id`` (a short unique label for its norm stats), then run:
-    #   uv run scripts/compute_norm_stats.py --config-name pi0_umi_dual_arm_v2
-    #   uv run scripts/train.py pi0_umi_dual_arm_v2 --exp-name=... --fsdp-devices=4
-    # If the new dataset has a DIFFERENT layout (state dims, camera keys, arm
-    # count, prompt language), the transforms in
-    # src/openpi/policies/umi_dual_arm_policy.py must be edited as well.
-    #
-    # TrainConfig(
-    #     name="pi0_umi_dual_arm_v2",
-    #     model=pi0_config.Pi0Config(),
-    #     data=UmiDualArmDataConfig(
-    #         # CHANGE ME: absolute path to your new dataset.
-    #         repo_id="/home/it002338/Junlin_lv/pi0/CHANGE_ME_dataset",
-    #         # CHANGE ME: short unique label so norm stats don't collide with other datasets.
-    #         assets=AssetsConfig(asset_id="CHANGE_ME"),
-    #         base_config=DataConfig(
-    #             prompt_from_task=True,
-    #         ),
-    #     ),
-    #     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
-    #     num_train_steps=30_000,
-    # ),
-    TrainConfig(
-        name="pi0_umi_dual_arm_v2",
+        name="pi0_umi_dual_arm_quat",
         model=pi0_config.Pi0Config(action_horizon=48),
         data=UmiDualArmDataConfig(
-            # CHANGE ME: absolute path to your new dataset.
             repo_id="/mnt/nm_dataset/dataset/giftbox_0621_1758episodes",
-            # CHANGE ME: short unique label so norm stats don't collide with other datasets.
             assets=AssetsConfig(asset_id="giftbox_0621_1758"),
             base_config=DataConfig(
                 prompt_from_task=True,
@@ -859,54 +827,12 @@ _CONFIGS = [
         num_workers=8,
     ),
     #
-    # Same as pi0_umi_dual_arm (earphone dataset, full fine-tune) but with the
-    # Option-2 world reframe ENABLED and nothing else changed. A constant per-arm
-    # rotation W is left-applied to all absolute poses, moving the absolute state
-    # quaternion cluster onto w~=1 (away from the w=0 / 180deg discontinuity). The
-    # relative action targets the model regresses are mathematically unchanged;
-    # UmiDualArmOutputs undoes W at inference so the deployed runtime sees the
-    # original frame. W = inv(mean orientation) per arm, computed from this dataset.
-    #
-    # IMPORTANT: the state distribution moved, so this config has its OWN asset_id
-    # and its norm_stats MUST be recomputed (do not reuse earphone_0620):
-    #   uv run scripts/compute_norm_stats.py --config-name pi0_umi_dual_arm_v3
-    #   uv run scripts/train.py pi0_umi_dual_arm_v3 --exp-name=... --fsdp-devices=4
+    # 6D-rotation sibling of pi0_umi_dual_arm_quat. Per arm the pose is 10-dim
+    # [pos3, rot6d6, grip1] -> STATE_DIM=20. The deployed runtime must consume 20-dim
+    # (6D-rotation, ROWS convention) actions, not 16-dim quaternion.
     #
     TrainConfig(
-        name="pi0_umi_dual_arm_v3",
-        model=pi0_config.Pi0Config(),
-        data=UmiDualArmDataConfig(
-            repo_id="/home/it002338/Junlin_lv/pi0/earphone_0620_316episodes",
-            # Distinct asset_id so reframed norm stats don't collide with pi0_umi_dual_arm.
-            assets=AssetsConfig(asset_id="earphone_0620_reframe"),
-            # Per-arm W = inv(mean orientation), computed from the earphone dataset.
-            # Flat (wl,xl,yl,zl, wr,xr,yr,zr); reshaped to (2,4) in the transform.
-            world_reframe_quat_wxyz=(
-                0.45594531, -0.03043296, -0.23385571, 0.85819533,  # left
-                0.45044910, -0.75766090, 0.41203593, -0.23080718,  # right
-            ),
-            base_config=DataConfig(
-                prompt_from_task=True,
-            ),
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
-        num_train_steps=30_000,
-    ),
-    #
-    # Same earphone dataset and full fine-tune as pi0_umi_dual_arm, but the rotation
-    # is represented as a CONTINUOUS 6D vector (Gram-Schmidt) instead of a quaternion.
-    # Per arm the pose is 10-dim [pos3, rot6d6, grip1] -> STATE_DIM=20. 6D has no
-    # double cover and no w=0 / 180deg sign-flip discontinuity, so it is the robust
-    # choice when orientations are spread out -- and it is free at the model since pi0
-    # zero-pads actions to action_dim=32 regardless. No world reframe needed.
-    #
-    # Distinct asset_id (state/action are 20-dim now), so norm_stats MUST be recomputed:
-    #   uv run scripts/compute_norm_stats.py --config-name pi0_umi_dual_arm_v4
-    #   uv run scripts/train.py pi0_umi_dual_arm_v4 --exp-name=... --fsdp-devices=4
-    # The deployed runtime must consume 20-dim (6D-rotation) actions, not 16-dim.
-    #
-    TrainConfig(
-        name="pi0_umi_dual_arm_v4",
+        name="pi0_umi_dual_arm_6Drot",
         model=pi0_config.Pi0Config(action_horizon=48),
         data=UmiDualArmRot6dDataConfig(
             repo_id="/mnt/nm_dataset/dataset/giftbox_0621_1758episodes",
@@ -920,7 +846,7 @@ _CONFIGS = [
         num_workers=8,
     ),
     TrainConfig(
-    name="pi05_umi_dual_arm_v2",
+    name="pi05_umi_dual_arm_quat",
     # pi0.5: discrete state token + adaRMSNorm timestep injection.
     # max_token_len bumps to 200 and discrete_state_input flips on automatically (see Pi0Config.__post_init__).
     model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input="False"),
@@ -934,6 +860,28 @@ _CONFIGS = [
     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
     num_train_steps=30_000,
     num_workers=8,
+    ),
+    #
+    # 6D-rotation sibling of pi05_umi_dual_arm_quat (pi0.5 base). Same dataset and
+    # discrete-state setup, but the UMI action is the continuous 6D representation
+    # (per arm [pos3, rot6d6, grip1], STATE_DIM=20) instead of quaternion. Norm stats
+    # are namespaced by config NAME so they don't collide with the quat pi0.5 config
+    # sharing this asset_id. The deployed runtime must consume 20-dim (6D-rotation,
+    # ROWS convention) actions. pi0.5 uses quantile normalization automatically.
+    #
+    TrainConfig(
+        name="pi05_umi_dual_arm_6Drot",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input="False"),
+        data=UmiDualArmRot6dDataConfig(
+            repo_id="/mnt/nm_dataset/dataset/giftbox_0628_1912episodes_qc_accept",
+            assets=AssetsConfig(asset_id="giftbox_0628_1912episodes_qc_accept"),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        num_workers=8,
     ),
     TrainConfig(
         name="pi0_libero_low_mem_finetune",

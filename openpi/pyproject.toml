@@ -131,6 +131,11 @@ force-sort-within-sections = true
 single-line-exclusions = ["collections.abc", "typing", "typing_extensions"]
 known-third-party = ["wandb"]
 
+[tool.ruff.lint.per-file-ignores]
+# Tests deliberately exercise module-private helpers (the transform math is the
+# unit under test), so private-member access is expected in test files.
+"**/*_test.py" = ["SLF001"]
+
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

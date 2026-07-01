@@ -118,9 +118,7 @@ def _relativize_actions(state: np.ndarray, actions: np.ndarray) -> np.ndarray:
         base = _pose8_to_mat(state[sl])  # (4,4)
         act = _pose8_to_mat(block)  # (T,4,4)
         rel = _mat_inv(base)[None] @ act  # (T,4,4)
-        out[:, sl] = np.concatenate(
-            [_mat_to_pose7(rel), block[:, _GRIP, None]], axis=-1
-        )
+        out[:, sl] = np.concatenate([_mat_to_pose7(rel), block[:, _GRIP, None]], axis=-1)
     return out
 
 
@@ -133,9 +131,7 @@ def _absolutize_actions(state: np.ndarray, rel_actions: np.ndarray) -> np.ndarra
         base = _pose8_to_mat(state[sl])  # (4,4)
         rel = _pose8_to_mat(block)  # (T,4,4); grip column ignored by _pose8_to_mat
         absm = base[None] @ rel
-        out[:, sl] = np.concatenate(
-            [_mat_to_pose7(absm), block[:, _GRIP, None]], axis=-1
-        )
+        out[:, sl] = np.concatenate([_mat_to_pose7(absm), block[:, _GRIP, None]], axis=-1)
     return out
 
 
