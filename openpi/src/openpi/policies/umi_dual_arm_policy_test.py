@@ -248,3 +248,76 @@ def test_world_reframe_outputs_return_original_frame():
         got = umi._quat_wxyz_to_mat(out["actions"][:, base + 3 : base + 7].astype(np.float64))
         want = umi._quat_wxyz_to_mat(absolute_expected[:, base + 3 : base + 7])
         np.testing.assert_allclose(got, want, atol=1e-5)
+
+
+# --------------------------------------------------------------------------- #
+# mask_absolute_state_pose: the model must not see the absolute EE pose, yet the
+# action relativization and the inference-time absolutize base must be unaffected.
+# --------------------------------------------------------------------------- #
+def test_mask_hides_pose_but_keeps_gripper_and_actions():
+    """With masking on, the model ``state`` has pose zeroed / gripper kept, and the
+    relativized actions are byte-for-byte identical to the unmasked config."""
+    rng = np.random.default_rng(11)
+    data = _make_data(rng, horizon=9)
+
+    plain = umi.UmiDualArmInputs(model_type=_model.ModelType.PI0)(data)
+    masked = umi.UmiDualArmInputs(model_type=_model.ModelType.PI0, mask_absolute_state_pose=True)(data)
+
+    for a in range(umi.N_ARMS):
+        base = a * umi.ARM_DIM
+        # Position + orientation zeroed in the model-facing state.
+        np.testing.assert_array_equal(masked["state"][base : base + 7], np.zeros(7, dtype=np.float32))
+        # Gripper preserved exactly.
+        assert masked["state"][base + umi._GRIP] == plain["state"][base + umi._GRIP]
+    # Masking the state must NOT change the regressed (relative) action target.
+    np.testing.assert_array_equal(masked["actions"], plain["actions"])
+    # No side channel while actions are present (training / norm-stats path).
+    assert "absolute_state" not in masked
+
+
+def test_mask_inference_side_channel_absolutizes_correctly():
+    """Inference: model sees a masked state, but ``absolute_state`` lets Outputs
+    recover the true absolute targets exactly (no runtime change needed)."""
+    rng = np.random.default_rng(12)
+    data = _make_data(rng, horizon=10)  # has actions -> gives us the relativized chunk
+
+    train = umi.UmiDualArmInputs(model_type=_model.ModelType.PI0, mask_absolute_state_pose=True)(data)
+    # Same observation, inference form (no actions) -> masked state + side channel.
+    infer = umi.UmiDualArmInputs(model_type=_model.ModelType.PI0, mask_absolute_state_pose=True)(
+        _drop_actions(data)
+    )
+    assert "absolute_state" in infer
+    np.testing.assert_array_equal(infer["state"], train["state"])  # both masked identically
+
+    out = umi.UmiDualArmOutputs()(
+        {"state": infer["state"], "absolute_state": infer["absolute_state"], "actions": train["actions"]}
+    )
+
+    absolute_expected = umi._raw23_to_pose16(data["actions"].astype(np.float64))
+    for a in range(umi.N_ARMS):
+        base = a * umi.ARM_DIM
+        np.testing.assert_allclose(out["actions"][:, base : base + 3], absolute_expected[:, base : base + 3], atol=1e-5)
+        np.testing.assert_allclose(out["actions"][:, base + 7], absolute_expected[:, base + 7], atol=1e-5)
+        got = umi._quat_wxyz_to_mat(out["actions"][:, base + 3 : base + 7].astype(np.float64))
+        want = umi._quat_wxyz_to_mat(absolute_expected[:, base + 3 : base + 7])
+        np.testing.assert_allclose(got, want, atol=1e-5)
+
+
+def test_mask_without_side_channel_fails_loudly():
+    """Sanity: absolutizing from the masked state (no side channel) cannot recover
+    the true poses -- the zeroed base orientation is an invalid quaternion, so it
+    raises rather than silently emitting wrong poses. This proves ``absolute_state``
+    is the load-bearing base and a missing side channel fails loud, not silent."""
+    rng = np.random.default_rng(13)
+    data = _make_data(rng, horizon=6)
+
+    train = umi.UmiDualArmInputs(model_type=_model.ModelType.PI0, mask_absolute_state_pose=True)(data)
+    # Fall back to the (masked, pose-zeroed) state as the absolutize base.
+    with np.testing.assert_raises(ValueError):
+        umi.UmiDualArmOutputs()({"state": train["state"], "actions": train["actions"]})
+
+
+
+def _drop_actions(data: dict) -> dict:
+    return {k: v for k, v in data.items() if k != "actions"}
+

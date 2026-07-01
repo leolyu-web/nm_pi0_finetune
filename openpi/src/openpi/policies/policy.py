@@ -93,6 +93,12 @@ class Policy(BasePolicy):
             "state": inputs["state"],
             "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
         }
+        # Forward any input-transform side channels the output transform needs (e.g.
+        # UmiDualArmInputs.mask_absolute_state_pose stashes the true absolute EE pose
+        # under ``absolute_state`` so the absolutize base survives even though the
+        # model's ``state`` feature is masked). Only present when a transform set it.
+        if "absolute_state" in inputs:
+            outputs["absolute_state"] = inputs["absolute_state"]
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)

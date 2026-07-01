@@ -381,6 +381,14 @@ class UmiDualArmDataConfig(DataConfigFactory):
     # transform. (Flat, not nested, because tyro cannot serialize nested-tuple defaults.)
     world_reframe_quat_wxyz: tyro.conf.Suppress[tuple[float, ...] | None] = None
 
+    # When True, remove the absolute EE pose (per-arm position + orientation) from
+    # the state feature the model sees -- only the gripper widths remain. The action
+    # chunk is still relativized against the true pose, and the true pose is
+    # forwarded at inference via the ``absolute_state`` side channel so the
+    # absolutize contract (and the deployed runtime) is unchanged. A config that sets
+    # this MUST recompute norm_stats (the state distribution changes).
+    mask_absolute_state_pose: bool = False
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         # Remap the raw LeRobot dataset keys to the keys ``UmiDualArmInputs``
@@ -409,6 +417,7 @@ class UmiDualArmDataConfig(DataConfigFactory):
                 umi_dual_arm_policy.UmiDualArmInputs(
                     model_type=model_config.model_type,
                     world_reframe_quat_wxyz=self.world_reframe_quat_wxyz,
+                    mask_absolute_state_pose=self.mask_absolute_state_pose,
                 )
             ],
             outputs=[umi_dual_arm_policy.UmiDualArmOutputs(world_reframe_quat_wxyz=self.world_reframe_quat_wxyz)],
@@ -856,6 +865,11 @@ _CONFIGS = [
         base_config=DataConfig(
             prompt_from_task=True,
         ),
+        # Full fine-tune: do NOT feed the model the absolute EE pose. Only the
+        # gripper widths remain in the state; the true pose still drives action
+        # relativization and inference-time absolutization via a side channel.
+        # norm_stats MUST be recomputed for this config after this change.
+        mask_absolute_state_pose=True,
     ),
     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
     num_train_steps=30_000,

@@ -205,6 +205,13 @@ class UmiDualArmInputs(transforms.DataTransformFn):
     # Optional Option-2 world reframe: per-arm constant rotation W as a (w,x,y,z)
     # quaternion, e.g. ((wl,xl,yl,zl), (wr,xr,yr,zr)). None -> no reframe.
     world_reframe_quat_wxyz: tuple | None = None
+    # When True, drop the absolute EE pose (per-arm position + orientation) from the
+    # state feature the model sees -- only the gripper widths survive. The action
+    # chunk is still relativized against the TRUE pose, and the true pose is
+    # forwarded at inference via the ``absolute_state`` side channel so
+    # UmiDualArmOutputs can still absolutize (no deployed-runtime change). A config
+    # that sets this MUST recompute norm_stats (the state distribution changes).
+    mask_absolute_state_pose: bool = False
 
     def __call__(self, data: dict) -> dict:
         # 23-dim raw state -> 16-dim two-arm pose (drops 7 ego dims, keeps quat).
@@ -220,9 +227,21 @@ class UmiDualArmInputs(transforms.DataTransformFn):
         left_wrist = _parse_image(data["left_wrist_image"])
         right_wrist = _parse_image(data["right_wrist_image"])
 
+        # The state feature actually fed to the model. With mask_absolute_state_pose
+        # on, only the per-arm gripper survives; position + orientation are zeroed so
+        # the policy cannot condition on the absolute end-effector pose. ``state``
+        # (unmasked) is still used below to relativize the actions and to fill the
+        # ``absolute_state`` side channel.
+        model_state = state
+        if self.mask_absolute_state_pose:
+            model_state = np.zeros_like(state)
+            for a in range(N_ARMS):
+                grip = a * ARM_DIM + _GRIP
+                model_state[grip] = state[grip]
+
         mask_base = np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_
         inputs = {
-            "state": state.astype(np.float32),
+            "state": model_state.astype(np.float32),
             "image": {
                 "base_0_rgb": np.zeros_like(left_wrist),  # no head cam
                 "left_wrist_0_rgb": left_wrist,
@@ -241,6 +260,12 @@ class UmiDualArmInputs(transforms.DataTransformFn):
             if w_mats is not None:
                 actions = _reframe_pose16(actions, w_mats)
             inputs["actions"] = _relativize_actions(state, actions).astype(np.float32)
+        elif self.mask_absolute_state_pose:
+            # Inference path (no actions): the model no longer sees the absolute pose,
+            # so carry the true (post-reframe) pose through a side channel for the
+            # UmiDualArmOutputs absolutize base. Skipped when actions are present
+            # (training / norm-stats) since outputs never run there.
+            inputs["absolute_state"] = state.astype(np.float32)
 
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
@@ -258,7 +283,11 @@ class UmiDualArmOutputs(transforms.DataTransformFn):
     world_reframe_quat_wxyz: tuple | None = None
 
     def __call__(self, data: dict) -> dict:
-        state = np.asarray(data["state"], dtype=np.float64)[:STATE_DIM]
+        # Absolutize base: prefer the ``absolute_state`` side channel when present
+        # (set by UmiDualArmInputs.mask_absolute_state_pose, where the model's own
+        # ``state`` has the pose masked out); otherwise fall back to ``state``.
+        base = data["absolute_state"] if "absolute_state" in data else data["state"]
+        state = np.asarray(base, dtype=np.float64)[:STATE_DIM]
         rel = np.asarray(data["actions"], dtype=np.float64)[:, :STATE_DIM]
         abs_actions = _absolutize_actions(state, rel)
         if self.world_reframe_quat_wxyz is not None:
