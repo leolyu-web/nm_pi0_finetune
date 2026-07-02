@@ -160,6 +160,33 @@ class _NoVideoLeRobotDataset(lerobot_dataset.LeRobotDataset):
         return item
 
 
+def _create_single_lerobot_dataset(
+    repo_id: str,
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    *,
+    skip_videos: bool = False,
+) -> Dataset:
+    """Build one LeRobotDataset (with per-dataset fps + prompt) for ``repo_id``."""
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    dataset_cls = _NoVideoLeRobotDataset if skip_videos else lerobot_dataset.LeRobotDataset
+    dataset = dataset_cls(
+        repo_id,
+        # Use this dataset's OWN fps so mixed-fps datasets get correctly-spaced
+        # action chunks.
+        delta_timestamps={
+            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+        },
+    )
+
+    if data_config.prompt_from_task:
+        # Each dataset carries its own tasks.jsonl, so the prompt transform is
+        # applied per-dataset before concatenation.
+        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+
+    return dataset
+
+
 def create_torch_dataset(
     data_config: _config.DataConfig,
     action_horizon: int,
@@ -168,6 +195,12 @@ def create_torch_dataset(
     skip_videos: bool = False,
 ) -> Dataset:
     """Create a dataset for training.
+
+    If ``data_config.repo_ids`` is set, one LeRobotDataset is built per repo and
+    the results are concatenated (torch ConcatDataset) into a single map-style
+    dataset with a flat index space. Downstream shuffling then interleaves
+    samples across all datasets, and sampling is proportional to each dataset's
+    size. Otherwise a single dataset is built from ``data_config.repo_id``.
 
     Set ``skip_videos=True`` to swap in a no-decode LeRobotDataset that fills
     video keys with zero placeholders. Use ONLY for norm-stats: training reads
@@ -179,19 +212,13 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
-    dataset_cls = _NoVideoLeRobotDataset if skip_videos else lerobot_dataset.LeRobotDataset
-    dataset = dataset_cls(
-        data_config.repo_id,
-        delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
-        },
-    )
-
-    if data_config.prompt_from_task:
-        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
-
-    return dataset
+    repo_ids = list(data_config.repo_ids) if data_config.repo_ids else [repo_id]
+    datasets = [
+        _create_single_lerobot_dataset(rid, data_config, action_horizon, skip_videos=skip_videos) for rid in repo_ids
+    ]
+    if len(datasets) == 1:
+        return datasets[0]
+    return torch.utils.data.ConcatDataset(datasets)
 
 
 def create_rlds_dataset(

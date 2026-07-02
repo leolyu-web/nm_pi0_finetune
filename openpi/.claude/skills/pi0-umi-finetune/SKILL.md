@@ -91,6 +91,7 @@ steps. They differ by base model, rotation rep, and how much absolute state the 
 | `pi05_umi_dual_arm_quat_allaxis` | **pi0.5** | quat 16 | full pose | giftbox_0628_1912_qc |
 | `pi05_umi_dual_arm_quat_allaxis_teleo_gripbug` | **pi0.5** | quat 16 | full pose | giftbox_0628_1912_qc |
 | `pi05_umi_dual_arm_6Drot` | **pi0.5** | 6D rot 20 | gripper only | giftbox_0628_1912_qc |
+| `pi05_umi_dual_arm_quat_multi` | **pi0.5** | quat 16 | gripper only | giftbox_0621_1758 **+** _0628_1912_qc (concat) |
 
 - **State masking** is controlled by `mask_absolute_state_pose` (gripper-only) + `keep_z_position_in_state`
   (adds absolute z), supported on **both** `UmiDualArmDataConfig` and `UmiDualArmRot6dDataConfig`.
@@ -136,6 +137,22 @@ helpers by design; ruff `SLF001` is ignored for `*_test.py` via `per-file-ignore
 4. `uv run scripts/train.py <name> --exp-name=<run> --fsdp-devices=4 --overwrite` (remote GPU).
 
 See the [README](../../../README.md) Fine-Tuning Guide for the operator-facing quick start.
+
+### Train on multiple datasets jointly
+Pass `repo_ids=(...)` (a tuple) to any `UmiDualArm*DataConfig` instead of a single `repo_id`. The
+loader (`data_loader.py` `create_torch_dataset`) builds one LeRobotDataset per repo — each with its
+OWN fps and its own `PromptFromLeRobotTask` — and wraps them in a torch `ConcatDataset`. Shuffling
+(`shuffle=True` in training) then interleaves samples across all datasets over one flat index space,
+sampled **proportional to each dataset's size** (bigger dataset appears more often; for equal
+exposure you'd need a `WeightedRandomSampler`, not yet wired). All repos MUST share the raw 23-dim
+UMI format (same state/action dims + camera keys) — one transform stack and one norm-stats vector
+cover the union, so `compute_norm_stats` builds the same concat and the stats are combined
+automatically. `pi05_umi_dual_arm_quat_multi` is the shipped example. Gotchas:
+- Set an explicit `assets.asset_id` (a list has no single id to fall back on).
+- Also set a plain `repo_id` (= `repo_ids[0]`) in the config: tyro marks the factory `repo_id`
+  (default `MISSING`) required, so without it the CLI demands `--data.repo-id`. `create_base_config`
+  keeps the given `repo_id` as the primary/asset_id-fallback and trains on the full `repo_ids` list.
+- Recompute norm stats over the union: `uv run scripts/compute_norm_stats.py --config-name <name>`.
 
 ### Change the action representation
 Recompute norm stats (old-dim stats are incompatible) AND update the deployed runtime to consume

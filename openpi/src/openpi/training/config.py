@@ -67,6 +67,15 @@ class AssetsConfig:
 class DataConfig:
     # LeRobot repo id. If None, fake data will be created.
     repo_id: str | None = None
+    # Optional list of LeRobot repo ids to train on jointly. When set (len >= 1),
+    # the loader builds one LeRobotDataset per repo and concatenates them
+    # (torch ConcatDataset), so shuffling interleaves samples across all of them
+    # and sampling is proportional to each dataset's size. All repos MUST share
+    # the same format (state/action dims, camera keys) since a single set of
+    # transforms + norm stats is applied to the union. ``repo_id`` remains the
+    # "primary" (used for the "fake" sentinel and asset_id fallback) and, when
+    # repo_ids is set, is just repo_ids[0]. None -> single-dataset via repo_id.
+    repo_ids: tuple[str, ...] | None = None
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.
@@ -169,6 +178,13 @@ class ModelTransformFactory(GroupFactory):
 class DataConfigFactory(abc.ABC):
     # The LeRobot repo id.
     repo_id: str = tyro.MISSING
+    # Optional list of LeRobot repo ids to train on jointly (concatenated). When
+    # non-empty this takes over from ``repo_id`` as the training set; ``repo_id``
+    # is then derived as repo_ids[0] for asset_id fallback. All repos must share
+    # the same format. A config that sets this should also set an explicit
+    # ``assets.asset_id`` (a list has no single id to fall back on) and recompute
+    # norm stats (stats are computed over the union).
+    repo_ids: tuple[str, ...] = ()
     # Determines how the assets will be loaded.
     assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
     # Base config that will be updated by the factory.
@@ -179,11 +195,16 @@ class DataConfigFactory(abc.ABC):
         """Create a data config."""
 
     def create_base_config(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        repo_ids = tuple(self.repo_ids) or None
         repo_id = self.repo_id if self.repo_id is not tyro.MISSING else None
+        if repo_ids is not None and repo_id is None:
+            # Primary repo id used for the "fake" sentinel and asset_id fallback.
+            repo_id = repo_ids[0]
         asset_id = self.assets.asset_id or repo_id
         return dataclasses.replace(
             self.base_config or DataConfig(),
             repo_id=repo_id,
+            repo_ids=repo_ids,
             asset_id=asset_id,
             norm_stats=self._load_norm_stats(epath.Path(self.assets.assets_dir or assets_dirs), asset_id),
             use_quantile_norm=model_config.model_type != ModelType.PI0,
@@ -1003,6 +1024,40 @@ _CONFIGS = [
                 prompt_from_task=True,
             ),
             # Gripper-only state (matches pi05_umi_dual_arm_quat). Recompute norm_stats.
+            mask_absolute_state_pose=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=30_000,
+        num_workers=8,
+    ),
+    #
+    # Multi-dataset example: train pi05_umi_dual_arm_quat jointly on TWO datasets by
+    # passing ``repo_ids`` (a list) instead of ``repo_id``. The loader builds one
+    # LeRobotDataset per repo and concatenates them, so shuffling interleaves samples
+    # across both and each dataset is sampled proportional to its size. All listed
+    # datasets MUST share the raw 23-dim dual-arm UMI format (same state/action dims
+    # and camera keys) -- a single set of transforms + one norm-stats vector is applied
+    # to the union. Set an explicit asset_id (a list has no single id to fall back on)
+    # and recompute norm stats over the union:
+    #   uv run scripts/compute_norm_stats.py --config-name pi05_umi_dual_arm_quat_multi
+    # Swap the repo_ids below for your actual datasets.
+    #
+    TrainConfig(
+        name="pi05_umi_dual_arm_quat_multi",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input="False"),
+        data=UmiDualArmDataConfig(
+            repo_ids=(
+                "/mnt/nm_dataset/dataset/giftbox_0621_1758episodes",
+                "/mnt/nm_dataset/dataset/giftbox_0628_1912episodes_qc_accept",
+            ),
+            # repo_id is required by tyro (factory default is MISSING); set it to the
+            # first repo so the CLI needs no --data.repo-id override. Training uses the
+            # full repo_ids list; repo_id here is only the asset_id fallback / primary.
+            repo_id="/mnt/nm_dataset/dataset/giftbox_0621_1758episodes",
+            assets=AssetsConfig(asset_id="giftbox_0621_0628_multi"),
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
             mask_absolute_state_pose=True,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
