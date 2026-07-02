@@ -45,7 +45,9 @@ cameras: observation.images.wrist_image_1 (left), wrist_image_2 (right),
          image (head cam — loaded by LeRobot but dropped in repack)
 ```
 
-- **State** is kept **ABSOLUTE** (per arm → 16-dim quat, or 20-dim after quat→matrix→rot6d).
+- **State** is computed **ABSOLUTE** (per arm → 16-dim quat, or 20-dim after quat→matrix→rot6d),
+  but the config option `mask_absolute_state_pose` can hide it from the model — see the Config Menu.
+  The absolute pose always still drives action relativization + inference-time absolutization.
 - **Actions** are **relativized in SE(3) at load time**, per arm:
   `T_rel = inv(T_obs) @ T_act`. Gripper width stays absolute.
 - This load-time relativization is our equivalent of pi0's linear `DeltaActions`, so pi0's
@@ -77,16 +79,27 @@ no `w=0`/180° sign flip. Quaternion works for our current data (the sign flip n
 
 ## The Config Menu
 
-| Config name | Base | Rep | Dataset | Horizon |
-|---|---|---|---|---|
-| `pi0_umi_dual_arm_quat` | pi0 | quat 16 | giftbox_0621_1758 | 48 |
-| `pi0_umi_dual_arm_6Drot` | pi0 | 6D rot 20 | giftbox_0621_1758 | 48 |
-| `pi05_umi_dual_arm_quat` | **pi0.5** | quat 16 | giftbox_0628_1912_qc | 48 |
-| `pi05_umi_dual_arm_6Drot` | **pi0.5** | 6D rot 20 | giftbox_0628_1912_qc | 48 |
+All full-fine-tune the raw dual-arm dataset (two wrist cams, head cam dropped), horizon 48, 30k
+steps. They differ by base model, rotation rep, and how much absolute state the model sees.
 
+| Config name | Base | Rep | State seen | Dataset |
+|---|---|---|---|---|
+| `pi0_umi_dual_arm_quat` | pi0 | quat 16 | gripper only | giftbox_0621_1758 |
+| `pi0_umi_dual_arm_6Drot` | pi0 | 6D rot 20 | gripper only | giftbox_0621_1758 |
+| `pi05_umi_dual_arm_quat` | **pi0.5** | quat 16 | gripper only | giftbox_0628_1912_qc |
+| `pi05_umi_dual_arm_quat_zaxis` | **pi0.5** | quat 16 | z + gripper | giftbox_0628_1912_qc |
+| `pi05_umi_dual_arm_quat_allaxis` | **pi0.5** | quat 16 | full pose | giftbox_0628_1912_qc |
+| `pi05_umi_dual_arm_quat_allaxis_teleo_gripbug` | **pi0.5** | quat 16 | full pose | giftbox_0628_1912_qc |
+| `pi05_umi_dual_arm_6Drot` | **pi0.5** | 6D rot 20 | gripper only | giftbox_0628_1912_qc |
+
+- **State masking** is controlled by `mask_absolute_state_pose` (gripper-only) + `keep_z_position_in_state`
+  (adds absolute z), supported on **both** `UmiDualArmDataConfig` and `UmiDualArmRot6dDataConfig`.
+  `pi05_umi_dual_arm_quat_allaxis` is the only unmasked (full-pose) config; `_teleo_gripbug` adds
+  `gripper_action_equals_state` (quat only) on top of full pose. **Any masking/target change needs a
+  norm-stats recompute** — the state (or action) distribution moves.
 - **assets_dirs** is namespaced by config `name` (`config.py:658`); `checkpoint_dir` =
-  `checkpoint_base_dir/name/exp_name`. So the `_quat` and `_6Drot` siblings share an `asset_id`
-  but write/load norm stats to distinct dirs — no collision.
+  `checkpoint_base_dir/name/exp_name`. So sibling configs that share an `asset_id` (all `_0628_qc`
+  pi0.5 configs; the `_quat`/`_6Drot` pi0 pair) write/load norm stats to distinct dirs — no collision.
 - **Option-2 world reframe** (available but no shipped config sets it): optional
   `world_reframe_quat_wxyz` on `UmiDualArmDataConfig` (flat 8 floats, per-arm wxyz) left-applies
   a constant per-arm `W = inv(mean orientation)` so the absolute state cluster sits near `w=1`,
@@ -122,7 +135,7 @@ helpers by design; ruff `SLF001` is ignored for `*_test.py` via `per-file-ignore
 3. `uv run scripts/compute_norm_stats.py --config-name <name>` (on the box with the dataset).
 4. `uv run scripts/train.py <name> --exp-name=<run> --fsdp-devices=4 --overwrite` (remote GPU).
 
-See `FINETUNE.md` for the operator-facing quick start.
+See the [README](../../../README.md) Fine-Tuning Guide for the operator-facing quick start.
 
 ### Change the action representation
 Recompute norm stats (old-dim stats are incompatible) AND update the deployed runtime to consume
@@ -137,15 +150,14 @@ to invert it for the runtime; add a `DataConfig` factory (copy `UmiDualArmDataCo
 `repack` key renames and `action_sequence_keys`; write transform tests. If the raw data needs
 offline fixing (video re-encode, unit/field fixes) before it's a valid LeRobot dataset, put those
 scripts in a top-level `data_processing/` folder — keep offline prep separate from the load-time
-transform. Full walkthrough: `FINETUNE.md` Step 0.5.
+transform. Full walkthrough: [README](../../../README.md) Fine-Tuning Guide, Step 0.5.
 
 ## Common Issues
 
-- **ffmpeg / AV1 decode fails**: no system ffmpeg → torchcodec can't decode. Install userspace
-  `conda create -n ffmpeg7 -c conda-forge ffmpeg=7` and export
-  `LD_LIBRARY_PATH=<conda>/envs/ffmpeg7/lib:$LD_LIBRARY_PATH` before data/train commands.
-  `compute_norm_stats` defaults `skip_videos=True` so the stats pass avoids this; training still
-  needs it.
+- **ffmpeg / AV1 decode**: the UMI videos are AV1; torchcodec needs ffmpeg 7 to decode them. It is
+  installed system-wide on our machines, so this normally just works. If a box lacks it, decode
+  fails — install ffmpeg 7 there. `compute_norm_stats` defaults `skip_videos=True` so the stats
+  pass avoids decode; training still needs it.
 - **Norm stats "not found" / trained on wrong scale**: stats load from `assets/<name>/<asset_id>/`.
   `compute_norm_stats.py:133` now writes to `assets_dirs/asset_id` (matches the load side,
   `config.py:196`) — this was previously mis-joined with the absolute `repo_id`; no manual move

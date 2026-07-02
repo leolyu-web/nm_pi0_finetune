@@ -235,19 +235,44 @@ class UmiDualArmInputs(transforms.DataTransformFn):
     """
 
     model_type: _model.ModelType
+    # When True, drop the absolute EE pose (per-arm position + orientation) from the
+    # state feature the model sees -- only the gripper widths survive. The action
+    # chunk is still relativized against the TRUE pose, and the true pose is
+    # forwarded at inference via the ``absolute_state`` side channel so
+    # UmiDualArmOutputs can still absolutize (no deployed-runtime change). A config
+    # that sets this MUST recompute norm_stats (the state distribution changes).
+    mask_absolute_state_pose: bool = False
+    # Only meaningful with ``mask_absolute_state_pose``: keep the per-arm absolute
+    # z (height) position in the model's state feature (x, y, and orientation stay
+    # masked). Lets the policy condition on height while staying blind to absolute
+    # planar position + orientation.
+    keep_z_position_in_state: bool = False
 
     def __call__(self, data: dict) -> dict:
         # 23-dim raw -> 16-dim two-arm QUATERNION pose (drops 7 ego dims).
         state_quat = _raw23_to_quatpose16(np.asarray(data["state"], dtype=np.float64))  # (16,)
-        # ABSOLUTE state for the model: quat -> matrix -> rot6d (rows), last.
+        # ABSOLUTE state: quat -> matrix -> rot6d (rows), last. Kept unmasked below to
+        # relativize the actions and to fill the ``absolute_state`` side channel.
         state = _quatpose16_to_rot6d20(state_quat)  # (20,)
 
         left_wrist = _parse_image(data["left_wrist_image"])
         right_wrist = _parse_image(data["right_wrist_image"])
 
+        # The state feature actually fed to the model. With mask_absolute_state_pose
+        # on, only the per-arm gripper survives; position + rot6d are zeroed so the
+        # policy cannot condition on the absolute end-effector pose.
+        model_state = state
+        if self.mask_absolute_state_pose:
+            model_state = np.zeros_like(state)
+            for a in range(N_ARMS):
+                base = a * ARM_DIM
+                model_state[base + _GRIP] = state[base + _GRIP]
+                if self.keep_z_position_in_state:
+                    model_state[base + _POS.start + 2] = state[base + _POS.start + 2]  # absolute z (height)
+
         mask_base = np.True_ if self.model_type == _model.ModelType.PI0_FAST else np.False_
         inputs = {
-            "state": state.astype(np.float32),
+            "state": model_state.astype(np.float32),
             "image": {
                 "base_0_rgb": np.zeros_like(left_wrist),  # no head cam
                 "left_wrist_0_rgb": left_wrist,
@@ -265,6 +290,12 @@ class UmiDualArmInputs(transforms.DataTransformFn):
             # relativize -> rot6d (rows) last -> (T,20) UMI relative trajectory.
             actions_quat = _raw23_to_quatpose16(np.asarray(data["actions"], dtype=np.float64))
             inputs["actions"] = _relativize_actions(state_quat, actions_quat).astype(np.float32)
+        elif self.mask_absolute_state_pose:
+            # Inference path (no actions): the model no longer sees the absolute pose,
+            # so carry the true (rot6d-20) pose through a side channel for the
+            # UmiDualArmOutputs absolutize base. Skipped when actions are present
+            # (training / norm-stats) since outputs never run there.
+            inputs["absolute_state"] = state.astype(np.float32)
 
         if "prompt" in data:
             inputs["prompt"] = data["prompt"]
@@ -277,6 +308,10 @@ class UmiDualArmOutputs(transforms.DataTransformFn):
     """Converts the model's relative 6D action chunk back to absolute EE poses."""
 
     def __call__(self, data: dict) -> dict:
-        state = np.asarray(data["state"], dtype=np.float64)[:STATE_DIM]
+        # Absolutize base: prefer the ``absolute_state`` side channel when present
+        # (set by UmiDualArmInputs.mask_absolute_state_pose, where the model's own
+        # ``state`` has the pose masked out); otherwise fall back to ``state``.
+        base = data["absolute_state"] if "absolute_state" in data else data["state"]
+        state = np.asarray(base, dtype=np.float64)[:STATE_DIM]
         rel = np.asarray(data["actions"], dtype=np.float64)[:, :STATE_DIM]
         return {"actions": _absolutize_actions(state, rel).astype(np.float32)}

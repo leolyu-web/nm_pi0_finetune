@@ -207,3 +207,73 @@ def test_inputs_outputs_full_round_trip():
         want = umi._rot6d_to_mat(expected[:, base + 3 : base + 9])
         np.testing.assert_allclose(got, want, atol=1e-5)
         np.testing.assert_allclose(out["actions"][:, base + 9], expected[:, base + 9], atol=1e-5)
+
+
+def test_mask_absolute_state_pose_keeps_only_gripper():
+    """With masking on, the model state zeros pos+rot6d and keeps only the grippers."""
+    rng = np.random.default_rng(10)
+    data = _make_data(rng, horizon=8)
+
+    inputs = umi.UmiDualArmInputs(model_type=_model.ModelType.PI0, mask_absolute_state_pose=True)(data)
+    unmasked = umi._quatpose16_to_rot6d20(umi._raw23_to_quatpose16(data["state"].astype(np.float64)))
+
+    state = inputs["state"]
+    assert state.shape == (umi.STATE_DIM,)
+    for a in range(umi.N_ARMS):
+        base = a * umi.ARM_DIM
+        np.testing.assert_array_equal(state[base : base + 9], 0.0)  # pos3 + rot6d6 zeroed
+        assert state[base + umi._GRIP] == np.float32(unmasked[base + umi._GRIP])  # gripper survives
+
+    # Actions are still relativized against the TRUE pose -> masking is state-only.
+    ref = umi.UmiDualArmInputs(model_type=_model.ModelType.PI0)(data)
+    np.testing.assert_array_equal(inputs["actions"], ref["actions"])
+
+
+def test_masking_keeps_z_position():
+    """keep_z retains the per-arm absolute z (height); x/y/rot6d stay masked."""
+    rng = np.random.default_rng(11)
+    data = _make_data(rng, horizon=6)
+
+    inputs = umi.UmiDualArmInputs(
+        model_type=_model.ModelType.PI0, mask_absolute_state_pose=True, keep_z_position_in_state=True
+    )(data)
+    unmasked = umi._quatpose16_to_rot6d20(umi._raw23_to_quatpose16(data["state"].astype(np.float64)))
+
+    state = inputs["state"]
+    for a in range(umi.N_ARMS):
+        base = a * umi.ARM_DIM
+        np.testing.assert_array_equal(state[base : base + 2], 0.0)  # x, y masked
+        assert state[base + 2] == np.float32(unmasked[base + 2])  # z kept
+        np.testing.assert_array_equal(state[base + 3 : base + 9], 0.0)  # rot6d masked
+        assert state[base + umi._GRIP] == np.float32(unmasked[base + umi._GRIP])  # gripper kept
+
+
+def test_masked_inference_side_channel_round_trip():
+    """Masked inference: the absolute_state side channel drives the absolutize base."""
+    rng = np.random.default_rng(12)
+    data = _make_data(rng, horizon=10)
+
+    # Training-style call (actions present) gives the relative targets to absolutize.
+    train = umi.UmiDualArmInputs(model_type=_model.ModelType.PI0, mask_absolute_state_pose=True)(data)
+
+    # Inference-style call: no actions -> the true pose is carried via absolute_state,
+    # while the model's own state has pose masked out.
+    infer_data = {k: v for k, v in data.items() if k != "actions"}
+    infer = umi.UmiDualArmInputs(model_type=_model.ModelType.PI0, mask_absolute_state_pose=True)(infer_data)
+    assert "absolute_state" in infer
+    np.testing.assert_array_equal(infer["state"], train["state"])  # both masked identically
+
+    out = umi.UmiDualArmOutputs()({
+        "state": infer["state"],
+        "absolute_state": infer["absolute_state"],
+        "actions": train["actions"],
+    })
+
+    expected = umi._quatpose16_to_rot6d20(umi._raw23_to_quatpose16(data["actions"].astype(np.float64)))
+    for a in range(umi.N_ARMS):
+        base = a * umi.ARM_DIM
+        np.testing.assert_allclose(out["actions"][:, base : base + 3], expected[:, base : base + 3], atol=1e-5)
+        got = umi._rot6d_to_mat(out["actions"][:, base + 3 : base + 9].astype(np.float64))
+        want = umi._rot6d_to_mat(expected[:, base + 3 : base + 9])
+        np.testing.assert_allclose(got, want, atol=1e-5)
+        np.testing.assert_allclose(out["actions"][:, base + 9], expected[:, base + 9], atol=1e-5)

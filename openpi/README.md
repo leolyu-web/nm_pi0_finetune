@@ -46,13 +46,19 @@ representation**, and **how much absolute state the model sees**.
 
 | Config name | Base | Rotation | State seen | Notes |
 |---|---|---|---|---|
-| `pi0_umi_dual_arm_quat` | π₀ | quat (16-dim) | full pose | quaternion baseline |
-| `pi0_umi_dual_arm_6Drot` | π₀ | 6D rot (20-dim) | full pose | continuous, UMI-faithful |
+| `pi0_umi_dual_arm_quat` | π₀ | quat (16-dim) | gripper only | `mask_absolute_state_pose=True` |
+| `pi0_umi_dual_arm_6Drot` | π₀ | 6D rot (20-dim) | gripper only | continuous, UMI-faithful |
 | `pi05_umi_dual_arm_quat` | π₀.₅ | quat (16-dim) | gripper only | `mask_absolute_state_pose=True` |
 | `pi05_umi_dual_arm_quat_zaxis` | π₀.₅ | quat (16-dim) | z + gripper | `keep_z_position_in_state=True` |
-| `pi05_umi_dual_arm_quat_allaxis` | π₀.₅ | quat (16-dim) | full pose | π₀.₅ counterpart of the quat baseline |
+| `pi05_umi_dual_arm_quat_allaxis` | π₀.₅ | quat (16-dim) | full pose | full absolute pose in state |
 | `pi05_umi_dual_arm_quat_allaxis_teleo_gripbug` | π₀.₅ | quat (16-dim) | full pose | reproduces a teleop gripper-label bug |
-| `pi05_umi_dual_arm_6Drot` | π₀.₅ | 6D rot (20-dim) | full pose | π₀.₅ 6D sibling |
+| `pi05_umi_dual_arm_6Drot` | π₀.₅ | 6D rot (20-dim) | gripper only | π₀.₅ 6D sibling |
+
+- **State seen**: with `mask_absolute_state_pose=True` the model's state feature keeps only the
+  per-arm gripper widths; the true EE pose is hidden from the policy but still drives action
+  relativization and is forwarded to inference via the `absolute_state` side channel, so the
+  absolutize contract and deployed runtime are unchanged. **Recompute norm stats** whenever the
+  masking changes — the state distribution moves.
 
 - **Rotation**: 6D has no double cover / no `w=0` sign-flip discontinuity and is the UMI-faithful
   choice. It's free at the model — pi0 zero-pads actions to `action_dim=32` either way. The
@@ -211,18 +217,6 @@ Outputs: checkpoints → `checkpoints/<config-name>/run1/` (every 1k steps); W&B
 
 > **First step is slow.** JAX JIT-compiles the train step (~2–5 min) before throughput stabilizes.
 > That's normal, not a hang.
-
-### 4. Serve for inference
-
-```bash
-uv run scripts/serve_policy.py policy:checkpoint \
-    --policy.config=<your-config-name> \
-    --policy.dir=checkpoints/<config-name>/run1/30000
-```
-
-The server's `Outputs` transform inverts the SE(3) relativization and returns **absolute** per-arm
-poses; the deployed runtime consumes those and does any final robot-native conversion. Match the
-action dim to the config (16 quat vs 20 rot6d, ROWS convention).
 
 ---
 

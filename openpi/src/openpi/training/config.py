@@ -461,6 +461,19 @@ class UmiDualArmRot6dDataConfig(DataConfigFactory):
     so the Option-2 world reframe is unnecessary here.
     """
 
+    # When True, remove the absolute EE pose (per-arm position + rot6d) from the
+    # state feature the model sees -- only the gripper widths remain. The action
+    # chunk is still relativized against the true pose, and the true pose is
+    # forwarded at inference via the ``absolute_state`` side channel so the
+    # absolutize contract (and the deployed runtime) is unchanged. A config that
+    # sets this MUST recompute norm_stats (the state distribution changes).
+    mask_absolute_state_pose: bool = False
+
+    # Only meaningful with ``mask_absolute_state_pose``: keep the per-arm absolute z
+    # (height) position in the model's state feature; x, y, and orientation stay
+    # masked. Lets the policy condition on height while blind to planar position.
+    keep_z_position_in_state: bool = False
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         repack_transform = _transforms.Group(
@@ -480,7 +493,13 @@ class UmiDualArmRot6dDataConfig(DataConfigFactory):
         # Inputs handle the 23->20 slicing (quat->rot6d) AND the UMI relativization
         # in SE(3); outputs invert it at inference. DeltaActions stays OFF.
         data_transforms = _transforms.Group(
-            inputs=[umi_dual_arm_rot6d_policy.UmiDualArmInputs(model_type=model_config.model_type)],
+            inputs=[
+                umi_dual_arm_rot6d_policy.UmiDualArmInputs(
+                    model_type=model_config.model_type,
+                    mask_absolute_state_pose=self.mask_absolute_state_pose,
+                    keep_z_position_in_state=self.keep_z_position_in_state,
+                )
+            ],
             outputs=[umi_dual_arm_rot6d_policy.UmiDualArmOutputs()],
         )
 
@@ -843,6 +862,10 @@ _CONFIGS = [
             base_config=DataConfig(
                 prompt_from_task=True,
             ),
+            # Gripper-only state: do NOT feed the model the absolute EE pose. The
+            # true pose still drives action relativization + inference-time
+            # absolutization via the side channel. Recompute norm_stats for this.
+            mask_absolute_state_pose=True,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
@@ -862,6 +885,8 @@ _CONFIGS = [
             base_config=DataConfig(
                 prompt_from_task=True,
             ),
+            # Gripper-only state (see pi0_umi_dual_arm_quat). Recompute norm_stats.
+            mask_absolute_state_pose=True,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
@@ -977,6 +1002,8 @@ _CONFIGS = [
             base_config=DataConfig(
                 prompt_from_task=True,
             ),
+            # Gripper-only state (matches pi05_umi_dual_arm_quat). Recompute norm_stats.
+            mask_absolute_state_pose=True,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,

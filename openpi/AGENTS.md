@@ -9,7 +9,8 @@ matched pair of a **data transform** (`src/openpi/policies/`) and a **train/data
 The shipped example is a **dual-arm UMI** dataset (LeRobot v2.1, `dual_arm`, 30 fps, AV1 video):
 per frame a 23-dim absolute EE state/action (per arm `pos3 + quat_wxyz4 + grip1`, + 7 ego dims that
 are dropped) plus two wrist cameras. **If your dataset matches that layout, you only add a config;
-if it differs, you also write a transform** — both paths are in `FINETUNE.md` (Steps 0, 0.5).
+if it differs, you also write a transform** — both paths are in the [README](README.md)
+Fine-Tuning Guide (Steps 0, 0.5).
 
 ## Project Structure & Module Organization
 
@@ -26,7 +27,8 @@ if it differs, you also write a transform** — both paths are in `FINETUNE.md` 
   - `src/openpi/policies/umi_dual_arm_rot6d_policy.py` — 6D-rotation (20-dim) UMI transform.
   - `UmiDualArmDataConfig` / `UmiDualArmRot6dDataConfig` and the `pi0_umi_dual_arm*` /
     `pi05_umi_dual_arm*` `TrainConfig` blocks in `training/config.py`.
-  - `FINETUNE.md` — the operator-facing end-to-end fine-tune guide.
+  - `README.md` — the fork's operator-facing fine-tune guide (Config Menu + end-to-end steps;
+    folds in the former `FINETUNE.md`).
 
 ## Build, Test, and Development Commands
 
@@ -51,7 +53,7 @@ uv run ruff format .
 pre-commit run -a
 ```
 
-Typical fine-tune flow (see `FINETUNE.md` and the `pi0-umi-finetune` skill for the full story):
+Typical fine-tune flow (see `README.md` and the `pi0-umi-finetune` skill for the full story):
 
 ```bash
 uv run scripts/compute_norm_stats.py --config-name <config>
@@ -99,5 +101,5 @@ relevant skill; create a new one with `skill-creator` if none fits. Keep skills 
   transient task-completion reports. Scattered docs rot; centralized skills are maintained.
 - Doc hierarchy: **AGENTS.md** (this file — overview, env, quick start) → **skills**
   (`.claude/skills/` — subsystem detail, workflows, troubleshooting) → **code comments**
-  (implementation detail). The operator-facing `FINETUNE.md` is the one intentional exception:
-  a short quick-start that points into the skill for depth.
+  (implementation detail). The operator-facing fine-tune guide now lives in `README.md`:
+  a quick-start that points into the skill for depth.
