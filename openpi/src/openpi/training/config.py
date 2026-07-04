@@ -1024,7 +1024,7 @@ _CONFIGS = [
                 prompt_from_task=True,
             ),
             # Gripper-only state (matches pi05_umi_dual_arm_quat). Recompute norm_stats.
-            mask_absolute_state_pose=True,
+            mask_absolute_state_pose=False,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
