@@ -84,20 +84,20 @@ steps. They differ by base model, rotation rep, and how much absolute state the 
 
 | Config name | Base | Rep | State seen | Dataset |
 |---|---|---|---|---|
-| `pi0_umi_dual_arm_quat` | pi0 | quat 16 | gripper only | giftbox_0621_1758 |
-| `pi0_umi_dual_arm_6Drot` | pi0 | 6D rot 20 | gripper only | giftbox_0621_1758 |
-| `pi05_umi_dual_arm_quat` | **pi0.5** | quat 16 | gripper only | giftbox_0628_1912_qc |
-| `pi05_umi_dual_arm_quat_zaxis` | **pi0.5** | quat 16 | z + gripper | giftbox_0628_1912_qc |
-| `pi05_umi_dual_arm_quat_allaxis` | **pi0.5** | quat 16 | full pose | giftbox_0628_1912_qc |
-| `pi05_umi_dual_arm_quat_allaxis_teleo_gripbug` | **pi0.5** | quat 16 | full pose | giftbox_0628_1912_qc |
-| `pi05_umi_dual_arm_6Drot` | **pi0.5** | 6D rot 20 | gripper only | giftbox_0628_1912_qc |
-| `pi05_umi_dual_arm_quat_multi` | **pi0.5** | quat 16 | gripper only | giftbox_0621_1758 **+** _0628_1912_qc (concat) |
+| `pi0_umi_dual_arm_quat` | pi0 | quat 16 | full pose | giftbox_0621_1758 |
+| `pi0_umi_dual_arm_6Drot` | pi0 | 6D rot 20 | full pose | giftbox_0621_1758 |
+| `pi05_umi_dual_arm_quat` | **pi0.5** | quat 16 | full pose | giftbox_0628_1912_qc |
+| `pi05_umi_dual_arm_quat_allaxis` | **pi0.5** | quat 16 | full pose | giftbox_0628_1912_qc (explicit full-pose alias of `pi05_umi_dual_arm_quat`) |
+| `pi05_umi_dual_arm_6Drot` | **pi0.5** | 6D rot 20 | full pose | giftbox_0628_1912_qc |
+| `pi05_umi_dual_arm_quat_multi` | **pi0.5** | quat 16 | full pose | giftbox_0621_1758 **+** _0628_1912_qc (concat) |
 
 - **State masking** is controlled by `mask_absolute_state_pose` (gripper-only) + `keep_z_position_in_state`
   (adds absolute z), supported on **both** `UmiDualArmDataConfig` and `UmiDualArmRot6dDataConfig`.
-  `pi05_umi_dual_arm_quat_allaxis` is the only unmasked (full-pose) config; `_teleo_gripbug` adds
-  `gripper_action_equals_state` (quat only) on top of full pose. **Any masking/target change needs a
-  norm-stats recompute** — the state (or action) distribution moves.
+  All shipped configs currently run with `mask_absolute_state_pose=False`, i.e. the **full 16-dim
+  absolute pose** goes into the model's state; the flags remain available to hide it again.
+  `gripper_action_equals_state` (quat only) is also available to pin each action's gripper to the
+  observation gripper. **Any masking/target change needs a norm-stats recompute** — the state (or
+  action) distribution moves.
 - **assets_dirs** is namespaced by config `name` (`config.py:658`); `checkpoint_dir` =
   `checkpoint_base_dir/name/exp_name`. So sibling configs that share an `asset_id` (all `_0628_qc`
   pi0.5 configs; the `_quat`/`_6Drot` pi0 pair) write/load norm stats to distinct dirs — no collision.

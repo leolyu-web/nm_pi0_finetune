@@ -886,7 +886,7 @@ _CONFIGS = [
             # Gripper-only state: do NOT feed the model the absolute EE pose. The
             # true pose still drives action relativization + inference-time
             # absolutization via the side channel. Recompute norm_stats for this.
-            mask_absolute_state_pose=True,
+            mask_absolute_state_pose=False,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
@@ -907,7 +907,7 @@ _CONFIGS = [
                 prompt_from_task=True,
             ),
             # Gripper-only state (see pi0_umi_dual_arm_quat). Recompute norm_stats.
-            mask_absolute_state_pose=True,
+            mask_absolute_state_pose=False,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=30_000,
@@ -917,7 +917,7 @@ _CONFIGS = [
     name="pi05_umi_dual_arm_quat",
     # pi0.5: discrete state token + adaRMSNorm timestep injection.
     # max_token_len bumps to 200 and discrete_state_input flips on automatically (see Pi0Config.__post_init__).
-    model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input="False"),
+    model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input=False),
     data=UmiDualArmDataConfig(
         repo_id="/mnt/nm_dataset/dataset/giftbox_0628_1912episodes_qc_accept",
         assets=AssetsConfig(asset_id="giftbox_0628_1912episodes_qc_accept"),
@@ -928,36 +928,11 @@ _CONFIGS = [
         # gripper widths remain in the state; the true pose still drives action
         # relativization and inference-time absolutization via a side channel.
         # norm_stats MUST be recomputed for this config after this change.
-        mask_absolute_state_pose=True,
+        mask_absolute_state_pose=False,
     ),
     weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
     num_train_steps=30_000,
     num_workers=8,
-    ),
-    #
-    # z-axis variant of pi05_umi_dual_arm_quat: the state keeps the per-arm absolute
-    # z (height) position and gripper; x, y, and orientation are masked out. Middle
-    # ground between pi05_umi_dual_arm_quat (no absolute pose) and the pi0 quat config
-    # (full absolute pose). Same dataset/asset_id -- norm stats are namespaced by
-    # config NAME, so no collision. Actions relativization + inference absolutization
-    # are unchanged (the full true pose still flows via the absolute_state side
-    # channel). norm_stats MUST be recomputed for this config.
-    #
-    TrainConfig(
-        name="pi05_umi_dual_arm_quat_zaxis",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input="False"),
-        data=UmiDualArmDataConfig(
-            repo_id="/mnt/nm_dataset/dataset/giftbox_0628_1912episodes_qc_accept",
-            assets=AssetsConfig(asset_id="giftbox_0628_1912episodes_qc_accept"),
-            base_config=DataConfig(
-                prompt_from_task=True,
-            ),
-            mask_absolute_state_pose=True,
-            keep_z_position_in_state=True,
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
-        num_workers=8,
     ),
     #
     # all-axis variant of pi05_umi_dual_arm_quat: the state carries the FULL 16-dim
@@ -969,7 +944,7 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi05_umi_dual_arm_quat_allaxis",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input="False"),
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input=False),
         data=UmiDualArmDataConfig(
             repo_id="/mnt/nm_dataset/dataset/giftbox_0628_1912episodes_qc_accept",
             assets=AssetsConfig(asset_id="giftbox_0628_1912episodes_qc_accept"),
@@ -978,29 +953,6 @@ _CONFIGS = [
             ),
             # Full 16-dim absolute pose in the state (default: no masking).
             mask_absolute_state_pose=False,
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=30_000,
-        num_workers=8,
-    ),
-    #
-    # Teleop gripper-bug variant of pi05_umi_dual_arm_quat_allaxis: identical config
-    # (full 16-dim absolute pose in state), except every action's gripper is pinned
-    # to the current observation gripper (per arm) -- reproducing a teleop data bug
-    # where the recorded gripper action echoed the state instead of a target. Pose
-    # dims are unchanged. Recompute norm_stats for this config.
-    #
-    TrainConfig(
-        name="pi05_umi_dual_arm_quat_allaxis_teleo_gripbug",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input="False"),
-        data=UmiDualArmDataConfig(
-            repo_id="/mnt/nm_dataset/dataset/giftbox_0628_1912episodes_qc_accept",
-            assets=AssetsConfig(asset_id="giftbox_0628_1912episodes_qc_accept"),
-            base_config=DataConfig(
-                prompt_from_task=True,
-            ),
-            mask_absolute_state_pose=False,
-            gripper_action_equals_state=True,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
@@ -1016,7 +968,7 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi05_umi_dual_arm_6Drot",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input="False"),
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input=False),
         data=UmiDualArmRot6dDataConfig(
             repo_id="/mnt/nm_dataset/dataset/giftbox_0628_1912episodes_qc_accept",
             assets=AssetsConfig(asset_id="giftbox_0628_1912episodes_qc_accept"),
@@ -1044,7 +996,7 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi05_umi_dual_arm_quat_multi",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input="False"),
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input=False),
         data=UmiDualArmDataConfig(
             repo_ids=(
                 "/mnt/nm_dataset/dataset/giftbox_0621_1758episodes",
@@ -1058,7 +1010,7 @@ _CONFIGS = [
             base_config=DataConfig(
                 prompt_from_task=True,
             ),
-            mask_absolute_state_pose=True,
+            mask_absolute_state_pose=False,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,
