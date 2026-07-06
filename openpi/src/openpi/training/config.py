@@ -935,15 +935,15 @@ _CONFIGS = [
     num_workers=8,
     ),
     #
-    # all-axis variant of pi05_umi_dual_arm_quat: the state carries the FULL 16-dim
-    # absolute pose (per arm pos3 + quat4 + grip1), i.e. no masking at all -- the
-    # pi0.5 counterpart of pi0_umi_dual_arm_quat. Completes the state-masking sweep
-    # alongside pi05_umi_dual_arm_quat (gripper only) and _zaxis (z + gripper). Same
-    # dataset/asset_id; norm stats namespaced by config NAME, so no collision (but
-    # recompute norm_stats for this config).
+    # Gripper-only-state variant of pi05_umi_dual_arm_quat: the model's state feature
+    # keeps only the per-arm gripper widths; the absolute EE pose is masked out. The
+    # true pose still drives action relativization + inference-time absolutization via
+    # the absolute_state side channel. Same dataset/asset_id as pi05_umi_dual_arm_quat
+    # (which now feeds the FULL pose); norm stats namespaced by config NAME, so no
+    # collision (but recompute norm_stats for this config).
     #
     TrainConfig(
-        name="pi05_umi_dual_arm_quat_allaxis",
+        name="pi05_umi_dual_arm_quat_gripper",
         model=pi0_config.Pi0Config(pi05=True, action_horizon=48, discrete_state_input=False),
         data=UmiDualArmDataConfig(
             repo_id="/mnt/nm_dataset/dataset/giftbox_0628_1912episodes_qc_accept",
@@ -951,8 +951,8 @@ _CONFIGS = [
             base_config=DataConfig(
                 prompt_from_task=True,
             ),
-            # Full 16-dim absolute pose in the state (default: no masking).
-            mask_absolute_state_pose=False,
+            # Gripper-only state: mask the absolute EE pose out of the model input.
+            mask_absolute_state_pose=True,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         num_train_steps=30_000,

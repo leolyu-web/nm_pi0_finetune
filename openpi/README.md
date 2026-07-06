@@ -49,17 +49,17 @@ representation**, and **how much absolute state the model sees**.
 | `pi0_umi_dual_arm_quat` | π₀ | quat (16-dim) | full pose | `mask_absolute_state_pose=False` |
 | `pi0_umi_dual_arm_6Drot` | π₀ | 6D rot (20-dim) | full pose | continuous, UMI-faithful |
 | `pi05_umi_dual_arm_quat` | π₀.₅ | quat (16-dim) | full pose | `mask_absolute_state_pose=False` |
-| `pi05_umi_dual_arm_quat_allaxis` | π₀.₅ | quat (16-dim) | full pose | explicit full-pose alias of `pi05_umi_dual_arm_quat` |
+| `pi05_umi_dual_arm_quat_gripper` | π₀.₅ | quat (16-dim) | gripper only | `mask_absolute_state_pose=True` |
 | `pi05_umi_dual_arm_6Drot` | π₀.₅ | 6D rot (20-dim) | full pose | π₀.₅ 6D sibling |
 | `pi05_umi_dual_arm_quat_multi` | π₀.₅ | quat (16-dim) | full pose | trains on `giftbox_0621_1758` + `_0628_1912_qc` (concat) |
 
-- **State seen**: all shipped configs now feed the **full 16-dim absolute EE pose** into the
-  model's state (`mask_absolute_state_pose=False`). The `mask_absolute_state_pose` /
-  `keep_z_position_in_state` flags still exist on the data config — with masking on, the state keeps
-  only the per-arm gripper widths (optionally plus absolute z), while the true EE pose stays hidden
-  from the policy but continues to drive action relativization and is forwarded to inference via the
-  `absolute_state` side channel, so the absolutize contract and deployed runtime are unchanged.
-  **Recompute norm stats** whenever the masking changes — the state distribution moves.
+- **State seen**: most shipped configs feed the **full 16-dim absolute EE pose** into the model's
+  state (`mask_absolute_state_pose=False`); `pi05_umi_dual_arm_quat_gripper` is the exception, with
+  `mask_absolute_state_pose=True` so the state keeps only the per-arm gripper widths. With masking
+  on, the true EE pose stays hidden from the policy but still drives action relativization and is
+  forwarded to inference via the `absolute_state` side channel, so the absolutize contract and
+  deployed runtime are unchanged. `keep_z_position_in_state` (adds absolute z back) also remains
+  available. **Recompute norm stats** whenever the masking changes — the state distribution moves.
 
 - **Rotation**: 6D has no double cover / no `w=0` sign-flip discontinuity and is the UMI-faithful
   choice. It's free at the model — pi0 zero-pads actions to `action_dim=32` either way. The

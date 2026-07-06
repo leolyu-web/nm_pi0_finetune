@@ -87,17 +87,17 @@ steps. They differ by base model, rotation rep, and how much absolute state the 
 | `pi0_umi_dual_arm_quat` | pi0 | quat 16 | full pose | giftbox_0621_1758 |
 | `pi0_umi_dual_arm_6Drot` | pi0 | 6D rot 20 | full pose | giftbox_0621_1758 |
 | `pi05_umi_dual_arm_quat` | **pi0.5** | quat 16 | full pose | giftbox_0628_1912_qc |
-| `pi05_umi_dual_arm_quat_allaxis` | **pi0.5** | quat 16 | full pose | giftbox_0628_1912_qc (explicit full-pose alias of `pi05_umi_dual_arm_quat`) |
+| `pi05_umi_dual_arm_quat_gripper` | **pi0.5** | quat 16 | gripper only | giftbox_0628_1912_qc (gripper-only-state sibling of `pi05_umi_dual_arm_quat`) |
 | `pi05_umi_dual_arm_6Drot` | **pi0.5** | 6D rot 20 | full pose | giftbox_0628_1912_qc |
 | `pi05_umi_dual_arm_quat_multi` | **pi0.5** | quat 16 | full pose | giftbox_0621_1758 **+** _0628_1912_qc (concat) |
 
 - **State masking** is controlled by `mask_absolute_state_pose` (gripper-only) + `keep_z_position_in_state`
   (adds absolute z), supported on **both** `UmiDualArmDataConfig` and `UmiDualArmRot6dDataConfig`.
-  All shipped configs currently run with `mask_absolute_state_pose=False`, i.e. the **full 16-dim
-  absolute pose** goes into the model's state; the flags remain available to hide it again.
-  `gripper_action_equals_state` (quat only) is also available to pin each action's gripper to the
-  observation gripper. **Any masking/target change needs a norm-stats recompute** — the state (or
-  action) distribution moves.
+  Most shipped configs run with `mask_absolute_state_pose=False` (the **full 16-dim absolute pose**
+  goes into the model's state); `pi05_umi_dual_arm_quat_gripper` is the one that masks it on
+  (gripper-only state). `gripper_action_equals_state` (quat only) is also available to pin each
+  action's gripper to the observation gripper. **Any masking/target change needs a norm-stats
+  recompute** — the state (or action) distribution moves.
 - **assets_dirs** is namespaced by config `name` (`config.py:658`); `checkpoint_dir` =
   `checkpoint_base_dir/name/exp_name`. So sibling configs that share an `asset_id` (all `_0628_qc`
   pi0.5 configs; the `_quat`/`_6Drot` pi0 pair) write/load norm stats to distinct dirs — no collision.
